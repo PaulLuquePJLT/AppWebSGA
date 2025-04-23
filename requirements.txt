@@ -1,1 +1,4 @@
-streamlit-aggrid
+openpyxl
+pandas
+st-aggrid
+streamlit
