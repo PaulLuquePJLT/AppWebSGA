@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
-
+from io import BytesIO
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
 ###############################################################################
@@ -81,15 +81,26 @@ p.desc {
 ###############################################################################
 # 3. TABLA INTERACTIVA SIN AUTO-ACTUALIZACIÓN (NO_UPDATE)
 ###############################################################################
-def interactive_table_no_autoupdate(df: pd.DataFrame, key: str=None) -> pd.DataFrame:
+import pandas as pd
+from io import BytesIO
+import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
+
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
+
+# Función para mostrar y exportar el DataFrame
+def interactive_table_no_autoupdate(df: pd.DataFrame, key: str = None) -> pd.DataFrame:
     """
     Muestra un DataFrame con st_aggrid usando update_mode=NO_UPDATE:
-      - No hay re-run automático al editar o filtrar
-      - Se requiere un botón manual para "aplicar" los cambios
+      - La tabla es interactiva: los usuarios pueden filtrar y ordenar los datos
+      - Exportación a Excel para descargar los datos.
     """
+    # Configurar la tabla interactiva con AgGrid
     gb = GridOptionsBuilder.from_dataframe(df)
-    gb.configure_default_column(editable=True, filter=True)
-
+    gb.configure_default_column(filter=True)  # Habilitar filtros sin permitir edición
     gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
     gb.configure_grid_options(
         paginationPageSize=20,
@@ -97,11 +108,7 @@ def interactive_table_no_autoupdate(df: pd.DataFrame, key: str=None) -> pd.DataF
     )
     gb.configure_side_bar()
 
-    # Evitar re-run al pulsar Enter
     grid_options = gb.build()
-    grid_options["stopEnterEventPropagation"] = True
-    grid_options["enterMovesDownAfterEdit"] = True
-
     grid_response = AgGrid(
         df,
         gridOptions=grid_options,
@@ -110,7 +117,29 @@ def interactive_table_no_autoupdate(df: pd.DataFrame, key: str=None) -> pd.DataF
         theme="blue",
         key=key
     )
-    return pd.DataFrame(grid_response["data"])
+
+    # Botón para exportar la tabla a Excel
+    if st.button("Exportar a Excel", key=f"exportar_excel_{key}"):
+        # Crear el archivo Excel en memoria (sin guardarlo en el disco)
+        output = BytesIO()
+
+        # Usamos el motor 'openpyxl' para crear el archivo Excel
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Datos")
+            # No es necesario llamar a writer.save(), ya que openpyxl lo maneja automáticamente
+
+        output.seek(0)  # Volver al inicio del archivo
+
+        # Crear el botón de descarga usando `st.download_button`
+        st.download_button(
+            label="Descargar archivo Excel",
+            data=output,
+            file_name=f"{key}_editado.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    return df
+
 
 ###############################################################################
 # 4. FUNCIONES AUXILIARES DE NEGOCIO
@@ -266,7 +295,7 @@ def page_consultar_bd():
     selected_file = st.selectbox("Seleccionar archivo para cargar:", archivos)
     if selected_file:
         file_path = os.path.join(folder_path, selected_file)
-        st.write(f"Archivo seleccionado: `{selected_file}`")
+        st.write(f"Archivo seleccionado: {selected_file}")
 
         if st.button("Cargar archivo"):
             try:
@@ -300,6 +329,22 @@ def page_consultar_bd():
 
             except Exception as e:
                 st.error(f"Error al cargar el archivo: {e}")
+
+    # Nueva funcionalidad para exportar la tabla consultada
+    if "df_consultar_bd" in st.session_state:
+        if st.button("Exportar tabla consultada a Excel"):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                st.session_state["df_consultar_bd"].to_excel(writer, index=False, sheet_name="Datos")
+                writer.save()
+            output.seek(0)
+
+            st.download_button(
+                label="Descargar tabla consultada como Excel",
+                data=output,
+                file_name="tabla_consultada.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 def page_realizar_analisis():
@@ -388,95 +433,73 @@ def page_realizar_analisis():
 
 
 def page_consolidar_oc():
-    icon = MENU_OPCIONES["Registro de OC´s"]
+    icon = "📝"
     st.markdown(f"## {icon} Registro de OC´s")
 
-    set_directories()
+    # Cargar archivo de entrada
+    uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
+    curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
 
+    # Variables de entrada
     contenedor = st.text_input("Contenedor:")
     referencia = st.text_input("Referencia:")
     fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
-    uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
 
-    if st.button("Procesar"):
-        if not contenedor or not referencia:
-            st.error("Por favor, ingrese Contenedor y Referencia.")
-            return
-        if not uploaded_files:
-            st.error("No se subió ningún CSV.")
-            return
-
+    if uploaded_files and curva_articulo_file:
+        # Procesar archivos
         lista_df = []
-        nombres_archivos = []
         for upf in uploaded_files:
             try:
                 df_temp = pd.read_csv(upf)
                 lista_df.append(df_temp)
-                nombres_archivos.append(upf.name)
             except Exception as e:
                 st.error(f"Error al leer {upf.name}: {e}")
+        
+        if lista_df:
+            df_consolidado = pd.concat(lista_df, ignore_index=True)
+            df_consolidado.insert(0, "Shipment", contenedor)
+            df_consolidado.insert(1, "Referencia", referencia)
+            df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
 
-        if not lista_df:
-            st.warning("No se pudo consolidar ningún archivo.")
-            return
+            # Guardar los datos cargados en session_state para persistencia
+            st.session_state["df_consolidado"] = df_consolidado
+            st.success("Archivos procesados correctamente.")
 
-        df_consolidado = pd.concat(lista_df, ignore_index=True)
-        df_consolidado.insert(0, "Shipment", contenedor)
-        df_consolidado.insert(1, "Referencia", referencia)
-        df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
+            # Procesar las columnas utilizando las funciones auxiliares
+            desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
+            if not desc_cols:
+                st.error("No se encontró la columna 'Descripcion' en los CSV.")
+                return
+            desc_col = desc_cols[0]
 
-        desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
-        if not desc_cols:
-            st.error("No se encontró la columna 'Descripcion' en los CSV.")
-            return
-        desc_col = desc_cols[0]
+            # Aplicar las funciones auxiliares
+            df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
+            df_consolidado["Código Marca"] = df_consolidado.apply(
+                lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
+                axis=1
+            )
+            df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
+            df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
 
-        df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
+            # Guardar en session_state después de aplicar las funciones
+            st.session_state["df_consolidado"] = df_consolidado
 
-        if fecha_recepcion:
-            df_consolidado["Mes de Recepción"] = pd.to_datetime(fecha_recepcion).month
+            # Mostrar tabla cargada
+            st.markdown("### Datos Consolidados")
+            interactive_table_no_autoupdate(df_consolidado, key="consolidado_oc")
+
+            # Cargar y mostrar archivo de Curva Artículo
+            try:
+                df_curva_articulo = pd.read_csv(curva_articulo_file)
+                st.success("Archivo de Curva Artículo cargado correctamente.")
+                st.markdown("### Tabla de Curva Artículo")
+                interactive_table_no_autoupdate(df_curva_articulo, key="curva_articulo")
+            except Exception as e:
+                st.error(f"Error al cargar el archivo de Curva Artículo: {e}")
         else:
-            df_consolidado["Mes de Recepción"] = None
-
-        df_consolidado["Código Marca"] = df_consolidado.apply(
-            lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
-            axis=1
-        )
-        df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
-        df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
-
-        cols_final = ["Mes de Recepción", "Subfamilias", "Código Marca", "Marca", "Zona"]
-        cols_principales = [c for c in df_consolidado.columns if c not in cols_final]
-        df_consolidado = df_consolidado[cols_principales + cols_final]
-
-        output_csv = "ordenes_compra_consolidado.csv"
-        full_path_csv = os.path.join('DATA_MAUI_PJLT', output_csv)
-        df_consolidado.to_csv(full_path_csv, index=False)
-
-        st.success(f"Consolidación completada. CSV guardado en: {full_path_csv}")
-
-        st.write("#### Archivos cargados:")
-        for n in nombres_archivos:
-            st.write(f"- {n}")
-        st.write("---")
-
-        st.markdown("#### Vista previa (Editar sin re-run)")
-        df_table = interactive_table_no_autoupdate(df_consolidado, key="consolidar_oc")
-
-        if st.button("Aplicar Cambios (OC)"):
-            st.session_state["df_consolidado_editado"] = df_table
-            st.success("Cambios guardados en session_state. Se recargará la app.")
-            st.experimental_rerun()
-
-        if "df_consolidado_editado" in st.session_state:
-            st.markdown("##### Data en session_state (OC Editado):")
-            st.dataframe(st.session_state["df_consolidado_editado"].head(20))
-
-            if st.button("Exportar a Excel (OC Editado)"):
-                output_excel = "ordenes_compra_consolidado_editado.xlsx"
-                full_path_xlsx = os.path.join('DATA_MAUI_PJLT', output_excel)
-                st.session_state["df_consolidado_editado"].to_excel(full_path_xlsx, index=False)
-                st.success(f"Archivo Excel consolidado guardado en: {full_path_xlsx}")
+            st.warning("No se pudo consolidar ningún archivo.")
+    else:
+        st.warning("Por favor, sube los archivos CSV.")
 
 
 ###############################################################################
