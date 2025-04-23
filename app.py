@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from io import BytesIO
+import uuid  # Asegúrate de importar uuid al inicio del archivo
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
 ###############################################################################
@@ -433,10 +434,10 @@ def page_realizar_analisis():
 
 
 def page_consolidar_oc():
-    icon = "📝"
+    icon = MENU_OPCIONES["Registro de OC´s"]
     st.markdown(f"## {icon} Registro de OC´s")
 
-    # Cargar archivo de entrada
+    # Cargar archivos de entrada
     uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
     curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
 
@@ -446,7 +447,7 @@ def page_consolidar_oc():
     fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
 
     if uploaded_files and curva_articulo_file:
-        # Procesar archivos
+        # Procesar y consolidar múltiple CSV
         lista_df = []
         for upf in uploaded_files:
             try:
@@ -455,51 +456,60 @@ def page_consolidar_oc():
             except Exception as e:
                 st.error(f"Error al leer {upf.name}: {e}")
         
-        if lista_df:
-            df_consolidado = pd.concat(lista_df, ignore_index=True)
-            df_consolidado.insert(0, "Shipment", contenedor)
-            df_consolidado.insert(1, "Referencia", referencia)
-            df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
-
-            # Guardar los datos cargados en session_state para persistencia
-            st.session_state["df_consolidado"] = df_consolidado
-            st.success("Archivos procesados correctamente.")
-
-            # Procesar las columnas utilizando las funciones auxiliares
-            desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
-            if not desc_cols:
-                st.error("No se encontró la columna 'Descripcion' en los CSV.")
-                return
-            desc_col = desc_cols[0]
-
-            # Aplicar las funciones auxiliares
-            df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
-            df_consolidado["Código Marca"] = df_consolidado.apply(
-                lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
-                axis=1
-            )
-            df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
-            df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
-
-            # Guardar en session_state después de aplicar las funciones
-            st.session_state["df_consolidado"] = df_consolidado
-
-            # Mostrar tabla cargada
-            st.markdown("### Datos Consolidados")
-            interactive_table_no_autoupdate(df_consolidado, key="consolidado_oc")
-
-            # Cargar y mostrar archivo de Curva Artículo
-            try:
-                df_curva_articulo = pd.read_csv(curva_articulo_file)
-                st.success("Archivo de Curva Artículo cargado correctamente.")
-                st.markdown("### Tabla de Curva Artículo")
-                interactive_table_no_autoupdate(df_curva_articulo, key="curva_articulo")
-            except Exception as e:
-                st.error(f"Error al cargar el archivo de Curva Artículo: {e}")
-        else:
+        if not lista_df:
             st.warning("No se pudo consolidar ningún archivo.")
+            return
+
+        df_consolidado = pd.concat(lista_df, ignore_index=True)
+        df_consolidado.insert(0, "Shipment", contenedor)
+        df_consolidado.insert(1, "Referencia", referencia)
+        df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion)
+
+        # Aplicar funciones auxiliares
+        desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
+        if not desc_cols:
+            st.error("No se encontró la columna 'Descripcion' en los CSV.")
+            return
+        desc_col = desc_cols[0]
+
+        df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
+        df_consolidado["Código Marca"] = df_consolidado.apply(
+            lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
+            axis=1
+        )
+        df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
+        df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
+
+        st.session_state["df_consolidado"] = df_consolidado
+        st.success("Archivos procesados correctamente.")
+        st.markdown("### Datos Consolidados")
+        interactive_table_no_autoupdate(df_consolidado, key="consolidado_oc")
+
+        # Cargar y mostrar archivo de Curva Artículo con spinner y lectura por partes
+        try:
+            with st.spinner("Cargando Curva Artículo…"):
+                # Primero intento leer solo una muestra para validar
+                df_sample = pd.read_csv(curva_articulo_file, nrows=1000)
+            st.success("Muestra de Curva Artículo cargada correctamente.")
+            st.dataframe(df_sample.head(10))
+
+            with st.spinner("Leyendo archivo completo de Curva Artículo…"):
+                # Leer todo (ajusta sep/encoding si lo necesitas)
+                df_curva_articulo = pd.read_csv(curva_articulo_file, low_memory=False)
+
+            st.success("Archivo de Curva Artículo cargado correctamente.")
+            st.markdown("### Tabla de Curva Artículo")
+
+            # Usar key dinámico para evitar colisiones
+            grid_key = f"curva_articulo_{uuid.uuid4()}"
+            interactive_table_no_autoupdate(df_curva_articulo, key=grid_key)
+
+        except Exception as e:
+            st.error(f"Falló al cargar Curva Artículo: {e}")
+
     else:
-        st.warning("Por favor, sube los archivos CSV.")
+        st.warning("Por favor, sube los archivos CSV y el Archivo Curva.")
+
 
 
 ###############################################################################
