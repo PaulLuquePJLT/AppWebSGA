@@ -1,13 +1,10 @@
-import streamlit as st
+import streamlit as st 
 import pandas as pd
 import os
 import re
 from datetime import datetime
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from io import BytesIO
-import uuid  # Asegúrate de importar uuid al inicio del archivo
-import requests
-from bs4 import BeautifulSoup
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
 ###############################################################################
@@ -84,26 +81,17 @@ p.desc {
 ###############################################################################
 # 3. TABLA INTERACTIVA SIN AUTO-ACTUALIZACIÓN (NO_UPDATE)
 ###############################################################################
-import pandas as pd
-from io import BytesIO
-import streamlit as st
-from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
-
-import streamlit as st
-import pandas as pd
-from io import BytesIO
-from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
-
-# Función para mostrar y exportar el DataFrame
-def interactive_table_no_autoupdate(df: pd.DataFrame, key: str = None) -> pd.DataFrame:
+def interactive_table_no_autoupdate(df: pd.DataFrame, key: str=None) -> pd.DataFrame:
     """
     Muestra un DataFrame con st_aggrid usando update_mode=NO_UPDATE:
-      - La tabla es interactiva: los usuarios pueden filtrar y ordenar los datos
-      - Exportación a Excel para descargar los datos.
+      - No hay re-run automático al editar o filtrar
+      - Se requiere un botón manual para "aplicar" los cambios
     """
-    # Configurar la tabla interactiva con AgGrid
+    from io import BytesIO
+
     gb = GridOptionsBuilder.from_dataframe(df)
-    gb.configure_default_column(filter=True)  # Habilitar filtros sin permitir edición
+    gb.configure_default_column(editable=True, filter=True)
+
     gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=20)
     gb.configure_grid_options(
         paginationPageSize=20,
@@ -111,7 +99,11 @@ def interactive_table_no_autoupdate(df: pd.DataFrame, key: str = None) -> pd.Dat
     )
     gb.configure_side_bar()
 
+    # Evitar re-run al pulsar Enter
     grid_options = gb.build()
+    grid_options["stopEnterEventPropagation"] = True
+    grid_options["enterMovesDownAfterEdit"] = True
+
     grid_response = AgGrid(
         df,
         gridOptions=grid_options,
@@ -120,20 +112,18 @@ def interactive_table_no_autoupdate(df: pd.DataFrame, key: str = None) -> pd.Dat
         theme="blue",
         key=key
     )
+    edited_df = pd.DataFrame(grid_response["data"])
 
     # Botón para exportar la tabla a Excel
-    if st.button("Exportar a Excel", key=f"exportar_excel_{key}"):
-        # Crear el archivo Excel en memoria (sin guardarlo en el disco)
+    if st.button("Exportar a Excel"):
+        # Convertir el DataFrame a un archivo Excel en memoria
         output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            edited_df.to_excel(writer, index=False, sheet_name="Datos")
+            writer.save()
+        output.seek(0)
 
-        # Usamos el motor 'openpyxl' para crear el archivo Excel
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Datos")
-            # No es necesario llamar a writer.save(), ya que openpyxl lo maneja automáticamente
-
-        output.seek(0)  # Volver al inicio del archivo
-
-        # Crear el botón de descarga usando `st.download_button`
+        # Crear el botón de descarga
         st.download_button(
             label="Descargar archivo Excel",
             data=output,
@@ -141,8 +131,7 @@ def interactive_table_no_autoupdate(df: pd.DataFrame, key: str = None) -> pd.Dat
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    return df
-
+    return edited_df
 
 ###############################################################################
 # 4. FUNCIONES AUXILIARES DE NEGOCIO
@@ -265,75 +254,7 @@ def radio_menu_con_iconos():
             return k
 
     return seleccion_actual
-###############################################################################
-# 6. UTILIDADES PARA ONEDRIVE PÚBLICO
-###############################################################################
-def get_onedrive_file_links(onedrive_public_url: str) -> dict:
-    """
-    Intenta acceder al enlace público de carpeta OneDrive y extrae enlaces de 
-    descarga directa de cada archivo (.xlsx, .xlsb, .csv, .accdb).
-    Retorna dict: { nombre_archivo: url_descarga }
-    """
-    try:
-        resp = requests.get(onedrive_public_url, allow_redirects=True)
-        resp.raise_for_status()
-    except Exception as e:
-        st.error(f"Error al acceder a la carpeta pública de OneDrive: {e}")
-        return {}
-    
-    soup = BeautifulSoup(resp.text, "html.parser")
-    links_dict = {}
 
-    all_anchors = soup.find_all("a", href=True)
-    for a in all_anchors:
-        href = a["href"]
-        if "download" in href.lower():
-            text = a.get_text(strip=True)
-            title = a.get("title")
-            # Detectar posible nombre de archivo
-            filename = None
-
-            # Revisamos 'title' primero
-            if title and re.search(r"\.(xlsx|xlsb|csv|accdb)$", title, re.IGNORECASE):
-                filename = title
-            else:
-                # Revisamos el texto del anchor
-                if re.search(r"\.(xlsx|xlsb|csv|accdb)$", text, re.IGNORECASE):
-                    filename = text
-
-            if filename:
-                links_dict[filename] = href
-
-    return links_dict
-
-def read_file_from_link(file_url: str, filename: str) -> pd.DataFrame:
-    """
-    Descarga un archivo desde file_url (OneDrive) y lo lee en un DataFrame.
-    Soporta .xlsx, .xlsb, .csv. 
-    Para .accdb, se muestra advertencia (pandas no puede leer Access).
-    """
-    try:
-        r = requests.get(file_url, allow_redirects=True)
-        r.raise_for_status()
-        content = BytesIO(r.content)
-    except Exception as e:
-        st.error(f"Error al descargar {filename}: {e}")
-        return pd.DataFrame()
-    
-    ext = filename.lower().split(".")[-1]
-    if ext == "xlsx":
-        df = pd.read_excel(content)
-    elif ext == "xlsb":
-        df = pd.read_excel(content, engine="pyxlsb")
-    elif ext == "csv":
-        df = pd.read_csv(content)
-    elif ext == "accdb":
-        st.warning("Archivos .accdb (Access) no se pueden leer con pandas directamente.")
-        df = pd.DataFrame()
-    else:
-        st.warning(f"Extensión {ext} no soportada.")
-        df = pd.DataFrame()
-    return df
 ###############################################################################
 # 6. PÁGINAS / SECCIONES
 ###############################################################################
@@ -352,48 +273,70 @@ def page_home():
 
 
 def page_consultar_bd():
-    """
-    Nueva versión de page_consultar_bd que se conecta a OneDrive (carpeta pública),
-    lista los archivos y permite seleccionar uno para mostrarlo en la tabla interactiva.
-    """
     icon = MENU_OPCIONES["Consultar BD"]
-    st.markdown(f"## {icon} Consultar BD (OneDrive Público)")
+    st.markdown(f"## {icon} Consultar BD")
 
-    # Enlace público a la carpeta de OneDrive donde tienes tus archivos
-    onedrive_folder_link = "https://1drv.ms/f/c/768d07c32eb8b97b/Ev7i1egQyQxKsXlLscbIIJAB2RCzkQHJINueuYHkWujKlw?e=ngJFIF"
-    st.info(f"Usando carpeta pública OneDrive:\n{onedrive_folder_link}")
+    set_directories()
+    folder_path = 'DATA_MAUI_PJLT'
 
-    # 1) Obtener lista de archivos disponibles
-    links_dict = get_onedrive_file_links(onedrive_folder_link)
-    if not links_dict:
-        st.error("No se encontraron archivos o no se pudo extraer la información del enlace público.")
+    archivos = [f for f in os.listdir(folder_path) if f.endswith(('.xlsx', '.xlsb', '.csv'))]
+    if not archivos:
+        st.error("No se encontraron archivos en la carpeta 'DATA_MAUI_PJLT'.")
         return
 
-    # Filtramos extensiones de interés
-    valid_exts = (".xlsx", ".xlsb", ".csv", ".accdb")
-    archivos_disponibles = [f for f in links_dict.keys() if f.lower().endswith(valid_exts)]
+    selected_file = st.selectbox("Seleccionar archivo para cargar:", archivos)
+    if selected_file:
+        file_path = os.path.join(folder_path, selected_file)
+        st.write(f"Archivo seleccionado: {selected_file}")
 
-    if not archivos_disponibles:
-        st.warning("No se encontraron archivos con extensiones xlsx, xlsb, csv o accdb.")
-        return
+        if st.button("Cargar archivo"):
+            try:
+                if selected_file.endswith('.xlsx'):
+                    df = pd.read_excel(file_path)
+                elif selected_file.endswith('.xlsb'):
+                    df = pd.read_excel(file_path, engine='pyxlsb')
+                else:
+                    df = pd.read_csv(file_path)
 
-    # 2) Seleccionar archivo en lista desplegable
-    selected_file = st.selectbox("Seleccionar archivo para cargar:", archivos_disponibles)
+                st.success(f"Archivo cargado correctamente: {selected_file}")
 
-    # 3) Botón para cargar archivo
-    if st.button("Cargar archivo"):
-        file_url = links_dict[selected_file]
-        st.write(f"Archivo seleccionado: **{selected_file}**")
-        st.write(f"URL de descarga detectada: {file_url}")
+                # Mostrar tabla NO_UPDATE
+                st.markdown("### Datos (Editar sin re-run)")
+                df_table = interactive_table_no_autoupdate(df, key="consulta_bd")
 
-        df = read_file_from_link(file_url, selected_file)
-        if not df.empty:
-            st.success(f"Archivo {selected_file} cargado correctamente.")
-            st.markdown("### Vista Previa:")
-            interactive_table_no_autoupdate(df, key="onedrive_bd")
-        else:
-            st.warning("El DataFrame está vacío o no se pudo leer. "
-                       "Si es .accdb, no se puede cargar con pandas.")
+                if st.button("Aplicar Cambios (BD)"):
+                    st.session_state["df_consultar_bd"] = df_table
+                    st.success("Cambios guardados en session_state. Se recargará la app.")
+                    st.experimental_rerun()
+
+                if "df_consultar_bd" in st.session_state:
+                    st.markdown("#### Data en session_state (BD Editado):")
+                    st.dataframe(st.session_state["df_consultar_bd"].head(20))
+
+                    # Exportar a Excel
+                    if st.button("Exportar a Excel (BD Editado)"):
+                        out_name = f"{os.path.splitext(selected_file)[0]}_editado.xlsx"
+                        st.session_state["df_consultar_bd"].to_excel(out_name, index=False)
+                        st.success(f"Archivo Excel guardado localmente: {out_name}")
+
+            except Exception as e:
+                st.error(f"Error al cargar el archivo: {e}")
+
+    # Nueva funcionalidad para exportar la tabla consultada
+    if "df_consultar_bd" in st.session_state:
+        if st.button("Exportar tabla consultada a Excel"):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                st.session_state["df_consultar_bd"].to_excel(writer, index=False, sheet_name="Datos")
+                writer.save()
+            output.seek(0)
+
+            st.download_button(
+                label="Descargar tabla consultada como Excel",
+                data=output,
+                file_name="tabla_consultada.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 def page_realizar_analisis():
@@ -481,74 +424,96 @@ def page_realizar_analisis():
             st.error(f"Ocurrió un error al procesar el archivo: {e}")
 
 
-# Funcion para consolidar Ordenes de compra Maui
-def page_consolidar_oc(chunk_size: int = 1000):
+def page_consolidar_oc():
     icon = MENU_OPCIONES["Registro de OC´s"]
     st.markdown(f"## {icon} Registro de OC´s")
 
-    # Cargar archivos de entrada
-    uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
-    curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
+    set_directories()
 
-    # Variables de entrada
     contenedor = st.text_input("Contenedor:")
     referencia = st.text_input("Referencia:")
     fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
+    uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
 
-    if not (uploaded_files and curva_articulo_file):
-        st.warning("Por favor, sube los archivos CSV y el Archivo Curva.")
-        return
-
-    # Consolidación de múltiples CSV de OC´s (igual que antes) ...
-    # [omitido aquí para brevedad: tu lógica de df_consolidado, funciones auxiliares y tabla interactiva]
-
-    # —————— Ahora, CURVA ARTÍCULO por CHUNKS ——————
-    # Inicializar estado de chunk si no existe
-    if "curva_pos" not in st.session_state:
-        st.session_state.curva_pos = 0
-        st.session_state.curva_eof = False
-        st.session_state.df_curva_chunks = []
-
-    if st.button("🔄 Reiniciar lectura de Curva Artículo"):
-        st.session_state.curva_pos = 0
-        st.session_state.curva_eof = False
-        st.session_state.df_curva_chunks = []
-        st.experimental_rerun()
-
-    # Leer siguiente bloque si no llegamos al EOF
-    if not st.session_state.curva_eof:
-        try:
-            with st.spinner(f"Leyendo filas {st.session_state.curva_pos+1} a {st.session_state.curva_pos + chunk_size}..."):
-                reader = pd.read_csv(curva_articulo_file, chunksize=chunk_size, 
-                                     low_memory=False, skiprows=range(1, st.session_state.curva_pos+1))
-                df_chunk = next(reader)
-        except StopIteration:
-            st.session_state.curva_eof = True
-            st.info("Se alcanzó el final del archivo de Curva Artículo.")
-            df_chunk = pd.DataFrame()  # vacío
-        except Exception as e:
-            st.error(f"Error al leer chunk de Curva Artículo: {e}")
+    if st.button("Procesar"):
+        if not contenedor or not referencia:
+            st.error("Por favor, ingrese Contenedor y Referencia.")
+            return
+        if not uploaded_files:
+            st.error("No se subió ningún CSV.")
             return
 
-        if not df_chunk.empty:
-            st.session_state.df_curva_chunks.append(df_chunk)
-            st.session_state.curva_pos += len(df_chunk)
+        lista_df = []
+        nombres_archivos = []
+        for upf in uploaded_files:
+            try:
+                df_temp = pd.read_csv(upf)
+                lista_df.append(df_temp)
+                nombres_archivos.append(upf.name)
+            except Exception as e:
+                st.error(f"Error al leer {upf.name}: {e}")
 
-    # Concatenar todos los chunks leídos hasta ahora
-    df_curva_actual = pd.concat(st.session_state.df_curva_chunks, ignore_index=True) if st.session_state.df_curva_chunks else pd.DataFrame()
+        if not lista_df:
+            st.warning("No se pudo consolidar ningún archivo.")
+            return
 
-    st.success(f"Curva Artículo: {len(df_curva_actual)} filas cargadas{' (fin de archivo)' if st.session_state.curva_eof else ''}.")
-    st.markdown("### Vista previa de Curva Artículo")
-    
-    # Mostrar solo hasta 500 filas en la tabla interactiva para no colgar
-    preview = df_curva_actual.head(500)
-    grid_key = f"curva_articulo_{uuid.uuid4()}"
-    interactive_table_no_autoupdate(preview, key=grid_key)
+        df_consolidado = pd.concat(lista_df, ignore_index=True)
+        df_consolidado.insert(0, "Shipment", contenedor)
+        df_consolidado.insert(1, "Referencia", referencia)
+        df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
 
-    # Botón para leer el siguiente bloque, solo si no estamos al final
-    if not st.session_state.curva_eof:
-        st.button(f"Cargar siguiente {chunk_size} filas", key="next_curva_chunk")
+        desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
+        if not desc_cols:
+            st.error("No se encontró la columna 'Descripcion' en los CSV.")
+            return
+        desc_col = desc_cols[0]
 
+        df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
+
+        if fecha_recepcion:
+            df_consolidado["Mes de Recepción"] = pd.to_datetime(fecha_recepcion).month
+        else:
+            df_consolidado["Mes de Recepción"] = None
+
+        df_consolidado["Código Marca"] = df_consolidado.apply(
+            lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
+            axis=1
+        )
+        df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
+        df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
+
+        cols_final = ["Mes de Recepción", "Subfamilias", "Código Marca", "Marca", "Zona"]
+        cols_principales = [c for c in df_consolidado.columns if c not in cols_final]
+        df_consolidado = df_consolidado[cols_principales + cols_final]
+
+        output_csv = "ordenes_compra_consolidado.csv"
+        full_path_csv = os.path.join('DATA_MAUI_PJLT', output_csv)
+        df_consolidado.to_csv(full_path_csv, index=False)
+
+        st.success(f"Consolidación completada. CSV guardado en: {full_path_csv}")
+
+        st.write("#### Archivos cargados:")
+        for n in nombres_archivos:
+            st.write(f"- {n}")
+        st.write("---")
+
+        st.markdown("#### Vista previa (Editar sin re-run)")
+        df_table = interactive_table_no_autoupdate(df_consolidado, key="consolidar_oc")
+
+        if st.button("Aplicar Cambios (OC)"):
+            st.session_state["df_consolidado_editado"] = df_table
+            st.success("Cambios guardados en session_state. Se recargará la app.")
+            st.experimental_rerun()
+
+        if "df_consolidado_editado" in st.session_state:
+            st.markdown("##### Data en session_state (OC Editado):")
+            st.dataframe(st.session_state["df_consolidado_editado"].head(20))
+
+            if st.button("Exportar a Excel (OC Editado)"):
+                output_excel = "ordenes_compra_consolidado_editado.xlsx"
+                full_path_xlsx = os.path.join('DATA_MAUI_PJLT', output_excel)
+                st.session_state["df_consolidado_editado"].to_excel(full_path_xlsx, index=False)
+                st.success(f"Archivo Excel consolidado guardado en: {full_path_xlsx}")
 
 
 ###############################################################################
@@ -578,4 +543,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
