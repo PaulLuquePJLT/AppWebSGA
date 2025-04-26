@@ -1,3 +1,6 @@
 openpyxl
 pandas
 streamlit-aggrid
+beautifulsoup4
+requests
+msal
