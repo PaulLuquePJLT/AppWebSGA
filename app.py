@@ -9,6 +9,7 @@ import uuid  # Asegúrate de importar uuid al inicio del archivo
 import requests
 from bs4 import BeautifulSoup
 import msal
+from urllib.parse import urlencode, urlparse, parse_qs
 
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
@@ -20,6 +21,14 @@ st.set_page_config(
     page_icon="https://blogger.googleusercontent.com/img/a/AVvXsEgqcaKJ1VLBjTRUn-Jz8DNxGx2xuonGQitE2rZjDm_y_uLKe1_6oi5qMiinWMB91JLtS5IvR4Tj-RU08GEfx7h8FdXAEI5HuNoV9YumyfwyXL5qFQ6MJmZw2sKWqR6LWWT8OuEGEkIRRnS2cqP86TgHOoBVkqPPSIRgnHGa4uSEu4O4gM0iNBb7a8Dunfw1",
     layout="wide"
 )
+
+# Configuración de la aplicación (usando valores desde st.secrets)
+CLIENT_ID = st.secrets["ms_graph"]["client_id"]
+CLIENT_SECRET = st.secrets["ms_graph"]["client_secret"]
+TENANT_ID = st.secrets["ms_graph"]["tenant_id"]
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+SCOPES = ["Files.ReadWrite", "User.Read"] # Permisos para leer y escribir en OneDrive
+
 
 ###############################################################################
 # 2. CSS PARA PERSONALIZAR LA BARRA LATERAL Y ESTILOS GENERALES
@@ -82,19 +91,67 @@ p.desc {
 }
 </style>
 """, unsafe_allow_html=True)
+# Función para obtener el correo electrónico del usuario desde Microsoft Graph
+def get_user_email(access_token):
+    url = "https://graph.microsoft.com/v1.0/me"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    if "mail" in data:
+        return data["mail"]
+    elif "userPrincipalName" in data:  # Si "mail" no está disponible, se utiliza el nombre principal del usuario
+        return data["userPrincipalName"]
+    return None
+
+
+# Función para listar archivos de OneDrive
+def list_onedrive_files(access_token):
+    """Obtiene la lista de archivos desde OneDrive usando el token de acceso."""
+    url = "https://graph.microsoft.com/v1.0/me/drive/root/children"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    if "value" in data:
+        return data["value"]  # Lista de archivos
+    return None
+
+redirect_uri = "http://localhost:8501"
+
+# Función para generar el enlace de autorización con la redirección correcta
+def get_authorization_url():
+    app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY)
+    auth_url = app.get_authorization_request_url(SCOPES, redirect_uri=redirect_uri)
+    return auth_url
+# Función para intercambiar el código de autorización por un token de acceso
+def get_access_token_from_code(auth_code):
+    app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY)
+    result = app.acquire_token_by_authorization_code(auth_code, scopes=SCOPES, redirect_uri=redirect_uri)
+
+    # Verificar si se obtuvo el token
+    if result is None:
+        st.error("El resultado de la autenticación es None. Verifica los parámetros de la solicitud.")
+        return None
+    
+    if "access_token" in result:
+        return result["access_token"]
+    else:
+        st.error(f"Error al obtener el token de acceso: {result.get('error_description')}")
+        return None
+
+def login_button():
+    auth_url = get_authorization_url()
+    
+
+# Función para obtener el código de autorización desde la URL
+def get_auth_code_from_url():
+    url = st.query_params  # Obtener los parámetros de la URL
+    if 'code' in url:
+        return url['code'][0]  # Extraer el código de autorización
+    return None
 
 ###############################################################################
 # 3. TABLA INTERACTIVA SIN AUTO-ACTUALIZACIÓN (NO_UPDATE)
 ###############################################################################
-import pandas as pd
-from io import BytesIO
-import streamlit as st
-from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
-
-import streamlit as st
-import pandas as pd
-from io import BytesIO
-from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 
 # Función para mostrar y exportar el DataFrame
 def interactive_table_no_autoupdate(df: pd.DataFrame, key: str = None) -> pd.DataFrame:
@@ -252,11 +309,22 @@ def radio_menu_con_iconos():
             key="radio_menu_key"
         )
 
-        # Espacio para bajar el texto del final
-        st.markdown("<br><br><br><br>", unsafe_allow_html=True)
-        # Texto final
-        st.markdown(
-            "<p style='text-align:center;'>Developed by: PJLT</p>",
+        # Crear espacio para mover el botón abajo, sin afectar el menú ni el logo
+        st.sidebar.markdown("<br><br><br><br>", unsafe_allow_html=True)  # Añadir espacio para el botón
+
+        # Estilo del botón más pequeño y en la barra lateral
+        auth_url = get_authorization_url()  # Obtener el auth_url para el botón
+        st.sidebar.markdown(
+            f'<a href="{auth_url}" target="_blank">'
+            f'<button style="background-color:#0078d4; color:white; padding:5px 10px; font-size:12px; border-radius:8px; width: 100%;">'
+            'Iniciar sesión con OneDrive'
+            '</button>'
+            '</a>', unsafe_allow_html=True
+        )
+
+        # Texto final con tamaño de fuente configurado
+        st.sidebar.markdown(
+            "<p style='text-align:center; font-size:12px;'>Developed by: PJLT</p>",  # Cambiar el tamaño de la fuente aquí
             unsafe_allow_html=True
         )
 
@@ -267,6 +335,7 @@ def radio_menu_con_iconos():
             return k
 
     return seleccion_actual
+
 ###############################################################################
 # 6. LECTURA DE token
 ###############################################################################
@@ -444,12 +513,12 @@ def page_realizar_analisis():
             st.error(f"Ocurrió un error al procesar el archivo: {e}")
 
 
-# Funcion para consolidar Ordenes de compra Maui
-def page_consolidar_oc(chunk_size: int = 1000):
-    icon = MENU_OPCIONES["Registro de OC´s"]
+# Función principal para consolidar y procesar los archivos
+def page_consolidar_oc():
+    icon = "📝"
     st.markdown(f"## {icon} Registro de OC´s")
 
-    # Cargar archivos de entrada
+    # Cargar archivo de entrada
     uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
     curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
 
@@ -458,66 +527,100 @@ def page_consolidar_oc(chunk_size: int = 1000):
     referencia = st.text_input("Referencia:")
     fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
 
-    if not (uploaded_files and curva_articulo_file):
-        st.warning("Por favor, sube los archivos CSV y el Archivo Curva.")
-        return
+    if uploaded_files and curva_articulo_file:
+        # Procesar archivos
+        lista_df = []
+        for upf in uploaded_files:
+            try:
+                df_temp = pd.read_csv(upf)
+                lista_df.append(df_temp)
+            except Exception as e:
+                st.error(f"Error al leer {upf.name}: {e}")
+        
+        if lista_df:
+            df_consolidado = pd.concat(lista_df, ignore_index=True)
+            df_consolidado.insert(0, "Shipment", contenedor)
+            df_consolidado.insert(1, "Referencia", referencia)
+            df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
 
-    # Consolidación de múltiples CSV de OC´s (igual que antes) ...
-    # [omitido aquí para brevedad: tu lógica de df_consolidado, funciones auxiliares y tabla interactiva]
+            # Guardar los datos cargados en session_state para persistencia
+            st.session_state["df_consolidado"] = df_consolidado
+            st.success("Archivos procesados correctamente.")
 
-    # —————— Ahora, CURVA ARTÍCULO por CHUNKS ——————
-    # Inicializar estado de chunk si no existe
-    if "curva_pos" not in st.session_state:
-        st.session_state.curva_pos = 0
-        st.session_state.curva_eof = False
-        st.session_state.df_curva_chunks = []
+            # Procesar las columnas utilizando las funciones auxiliares
+            desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
+            if not desc_cols:
+                st.error("No se encontró la columna 'Descripcion' en los CSV.")
+                return
+            desc_col = desc_cols[0]
 
-    if st.button("🔄 Reiniciar lectura de Curva Artículo"):
-        st.session_state.curva_pos = 0
-        st.session_state.curva_eof = False
-        st.session_state.df_curva_chunks = []
-        st.experimental_rerun()
+            # Aplicar las funciones auxiliares
+            df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
+            df_consolidado["Código Marca"] = df_consolidado.apply(
+                lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
+                axis=1
+            )
+            df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
+            df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
 
-    # Leer siguiente bloque si no llegamos al EOF
-    if not st.session_state.curva_eof:
-        try:
-            with st.spinner(f"Leyendo filas {st.session_state.curva_pos+1} a {st.session_state.curva_pos + chunk_size}..."):
-                reader = pd.read_csv(curva_articulo_file, chunksize=chunk_size, 
-                                     low_memory=False, skiprows=range(1, st.session_state.curva_pos+1))
-                df_chunk = next(reader)
-        except StopIteration:
-            st.session_state.curva_eof = True
-            st.info("Se alcanzó el final del archivo de Curva Artículo.")
-            df_chunk = pd.DataFrame()  # vacío
-        except Exception as e:
-            st.error(f"Error al leer chunk de Curva Artículo: {e}")
-            return
+            # Guardar en session_state después de aplicar las funciones
+            st.session_state["df_consolidado"] = df_consolidado
 
-        if not df_chunk.empty:
-            st.session_state.df_curva_chunks.append(df_chunk)
-            st.session_state.curva_pos += len(df_chunk)
+            # Mostrar tabla cargada
+            st.markdown("### Datos Consolidados")
+            interactive_table_no_autoupdate(df_consolidado, key="consolidado_oc")
 
-    # Concatenar todos los chunks leídos hasta ahora
-    df_curva_actual = pd.concat(st.session_state.df_curva_chunks, ignore_index=True) if st.session_state.df_curva_chunks else pd.DataFrame()
-
-    st.success(f"Curva Artículo: {len(df_curva_actual)} filas cargadas{' (fin de archivo)' if st.session_state.curva_eof else ''}.")
-    st.markdown("### Vista previa de Curva Artículo")
-    
-    # Mostrar solo hasta 500 filas en la tabla interactiva para no colgar
-    preview = df_curva_actual.head(500)
-    grid_key = f"curva_articulo_{uuid.uuid4()}"
-    interactive_table_no_autoupdate(preview, key=grid_key)
-
-    # Botón para leer el siguiente bloque, solo si no estamos al final
-    if not st.session_state.curva_eof:
-        st.button(f"Cargar siguiente {chunk_size} filas", key="next_curva_chunk")
-
-
+            # Cargar y mostrar archivo de Curva Artículo
+            try:
+                df_curva_articulo = pd.read_csv(curva_articulo_file)
+                st.success("Archivo de Curva Artículo cargado correctamente.")
+                st.markdown("### Tabla de Curva Artículo")
+                interactive_table_no_autoupdate(df_curva_articulo, key="curva_articulo")
+            except Exception as e:
+                st.error(f"Error al cargar el archivo de Curva Artículo: {e}")
+        else:
+            st.warning("No se pudo consolidar ningún archivo.")
+    else:
+        st.warning("Por favor, sube los archivos CSV.")
+                
 
 ###############################################################################
 # 7. FUNCIÓN PRINCIPAL (NAVEGACIÓN)
 ###############################################################################
+# Función principal
 def main():
+    # Si el usuario ya ha iniciado sesión
+    auth_code = get_auth_code_from_url()
+    if auth_code:
+        # Intercambiamos el código por un token de acceso
+        result = get_access_token_from_code(auth_code)
+        if 'access_token' in result:
+            access_token = result['access_token']
+            st.success("Autenticación exitosa. Accediendo a OneDrive...")
+            
+            # Mostrar que está conectado a OneDrive
+            email = get_user_email(access_token)
+            if email:
+                st.write(f"Conectado con OneDrive como: {email}")
+            else:
+                st.error("No se pudo obtener el correo electrónico del usuario.")
+            
+            # Listar archivos de OneDrive
+            files = list_onedrive_files(access_token)
+            if files:
+                st.write("Archivos en OneDrive:")
+                for file in files:
+                    st.write(file["name"])
+            else:
+                st.error("No se encontraron archivos en OneDrive.")
+        else:
+            st.error("Error al obtener el token de acceso.")
+    else:
+        # Si no hay código, mostrar el botón de inicio de sesión
+        st.write("Para acceder a los archivos de OneDrive, por favor inicie sesión.")
+        login_button()
+
+    # Continuar con la interfaz de la aplicación Streamlit
     opcion = radio_menu_con_iconos()
 
     with st.container():
@@ -537,7 +640,6 @@ def main():
             st.warning("Has salido del Sistema de Gestión de Abastecimiento. Cierra la pestaña o selecciona otra opción.")
 
         st.markdown("</div>", unsafe_allow_html=True)
-
 
 if __name__ == "__main__":
     main()
