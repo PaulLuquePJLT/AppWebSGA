@@ -116,7 +116,7 @@ def list_onedrive_files(access_token):
     return None
 
 # redirect_uri = "https://localhost:8501"
-redirect_uri = "https://appwebsgapjlt.streamlit.app/"
+redirect_uri = st.secrets["ms_graph"]["redirect_uri"]
 
 # Función para generar el enlace de autorización con la redirección correcta
 def get_authorization_url():
