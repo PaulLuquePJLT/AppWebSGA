@@ -10,6 +10,8 @@ import requests
 from bs4 import BeautifulSoup
 import msal
 from urllib.parse import urlencode, urlparse, parse_qs
+import openpyxl
+from openpyxl import load_workbook
 
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
@@ -115,8 +117,8 @@ def list_onedrive_files(access_token):
         return data["value"]  # Lista de archivos
     return None
 
-# redirect_uri = "https://localhost:8501"
-redirect_uri = st.secrets["ms_graph"]["redirect_uri"]
+redirect_uri = "https://localhost:8501/signout-oidc/"
+# redirect_uri = st.secrets["ms_graph"]["redirect_uri"]
 
 # Función para generar el enlace de autorización con la redirección correcta
 def get_authorization_url():
@@ -266,7 +268,229 @@ def calcular_zona(marca):
     elif marca == "Rusty y Otros":
         return "B2.ME04.C01 a B2.ME04.C05"
     return None
+#Función auxiliar para calcular Tipo_Pack
+def calcular_tipo_pack(descripcion: str) -> str:
+    """
+    Retorna "Inner" si los dos primeros caracteres son " *",
+    de lo contrario retorna "Unidad".
+    """
+    if isinstance(descripcion, str) and len(descripcion) >= 2 and descripcion[:2] == " *":
+        return "Inner"
+    return "Unidad"
+def calcular_factor_por_caja(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula la columna 'Factor por Caja' en el dataframe `df` basado en:
+    - Agrupación por la columna 'Prtnum Padre'
+    - Suma de la columna 'Cantidad Empleada'
+    """
+    # Verificamos que existan las columnas requeridas
+    required_columns = ["Prtnum Padre", "Cantidad Empleada"]
+    for col in required_columns:
+        if col not in df.columns:
+            raise ValueError(f"Falta la columna obligatoria '{col}' en df_curva_articulo")
 
+    # Usamos 'transform' para sumar en cada grupo el valor de 'Cantidad Empleada'
+    df["Factor por Caja"] = df.groupby("Prtnum Padre")["Cantidad Empleada"].transform("sum")
+
+    return df
+def calcular_factor_caja(df_consolidado: pd.DataFrame, 
+                         df_curva_articulo: pd.DataFrame) -> pd.DataFrame:
+    """
+    1. Toma el valor de 'Num Producto' en df_consolidado,
+    2. Busca coincidencia en df_curva_articulo['Prtnum Padre']
+    3. Retorna el 'Factor por Caja' si hay coincidencia; si no, 1.
+    """
+    # Verificar que existan las columnas necesarias
+    if "Num Producto" not in df_consolidado.columns:
+        raise ValueError("No se encontró la columna 'Num Producto' en df_consolidado.")
+    if "Prtnum Padre" not in df_curva_articulo.columns:
+        raise ValueError("No se encontró la columna 'Prtnum Padre' en df_curva_articulo.")
+    if "Factor por Caja" not in df_curva_articulo.columns:
+        raise ValueError("No se encontró la columna 'Factor por Caja' en df_curva_articulo.")
+
+    # Creamos un diccionario para mapear: { Prtnum Padre -> Factor por Caja }
+    mapping = dict(zip(df_curva_articulo["Prtnum Padre"], df_curva_articulo["Factor por Caja"]))
+
+    # Para cada fila de df_consolidado, busca 'Num Producto' en mapping; si no existe, asigna 1
+    df_consolidado["Factor_Caja"] = df_consolidado["Num Producto"].map(mapping).fillna(1)
+    return df_consolidado
+
+
+def calcular_qty_inners(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    """
+    1. Si Tipo_Pack == "Inner" => Qty_Inners = Cantidad Esperada
+    2. Si Tipo_Pack == "Unidad" => Qty_Inners = Cant Cajas
+    """
+    # Verificar que existan las columnas necesarias
+    required_cols = ["Tipo_Pack", "Cantidad Esperada", "Cant Cajas"]
+    for col in required_cols:
+        if col not in df_consolidado.columns:
+            raise ValueError(f"No se encontró la columna '{col}' en df_consolidado.")
+
+    # Aplicar la lógica
+    df_consolidado["Qty_Inners"] = df_consolidado.apply(
+        lambda row: row["Cantidad Esperada"] if row["Tipo_Pack"] == "Inner" 
+                    else row["Cant Cajas"],
+        axis=1
+    )
+    return df_consolidado
+
+
+def calcular_qty_unidades(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    """
+    1. Si Tipo_Pack == "Inner" => Qty_Unidades = Qty_Inners * Factor_Caja
+    2. Si Tipo_Pack == "Unidad" => Qty_Unidades = Cantidad Esperada
+    """
+    # Verificar que existan las columnas necesarias
+    required_cols = ["Tipo_Pack", "Factor_Caja", "Qty_Inners", "Cantidad Esperada"]
+    for col in required_cols:
+        if col not in df_consolidado.columns:
+            raise ValueError(f"No se encontró la columna '{col}' en df_consolidado.")
+
+    # Aplicar la lógica
+    df_consolidado["Qty_Unidades"] = df_consolidado.apply(
+        lambda row: row["Qty_Inners"] * row["Factor_Caja"] if row["Tipo_Pack"] == "Inner"
+                    else row["Cantidad Esperada"],
+        axis=1
+    )
+    return df_consolidado
+def generar_df_f_expl_unid(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    """
+    Genera el DataFrame df_f_expl_unid tomando solo las filas con 'Tipo_Pack' == 'Unidad'
+    y ajustando las columnas al orden y nombre requeridos.
+    """
+    # Filtrar los registros con Tipo_Pack == 'Unidad'
+    df_unid = df_consolidado[df_consolidado["Tipo_Pack"] == "Unidad"].copy()
+
+    # Verificar columnas base
+    columnas_requeridas = [
+        "No Factura",
+        "Num Producto",
+        "Descripcion",          # o "Descripción", según tu CSV
+        "Qty_Unidades",
+        "Familia De Producto",
+        "Zona"
+    ]
+    for col in columnas_requeridas:
+        if col not in df_unid.columns:
+            raise ValueError(f"Falta la columna '{col}' en df_consolidado para generar df_f_expl_unid.")
+
+    # Crear nueva columna Observaciones (vacía)
+    df_unid["Observaciones"] = ""
+
+    # Renombrar y reordenar columnas
+    df_unid.rename(
+        columns={
+            "No Factura": "No Factura",
+            "Num Producto": "Código Hijo",
+            "Descripcion": "Descripción",
+            "Qty_Unidades": "Cantidad Und",
+            "Familia De Producto": "Familia",
+            "Zona": "Piso",
+        },
+        inplace=True
+    )
+
+    # Orden final
+    df_unid = df_unid[
+        ["No Factura",
+         "Código Hijo",
+         "Descripción",
+         "Cantidad Und",
+         "Familia",
+         "Observaciones",
+         "Piso"]
+    ]
+
+    return df_unid
+
+def mostrar_y_descargar_dataframe(df: pd.DataFrame, nombre: str):
+    # Mostrar con AgGrid (o st.dataframe)
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_pagination(paginationAutoPageSize=True)
+    gb.configure_side_bar()
+    grid_options = gb.build()
+
+    AgGrid(
+        df,
+        gridOptions=grid_options,
+        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        theme="blue"
+    )
+
+    # Botón para exportar a Excel
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=nombre)
+    output.seek(0)
+
+    st.download_button(
+        label="Descargar en Excel",
+        data=output,
+        file_name=f"{nombre}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+# ------------------------------------------------------------------------------
+# 2. Generar DataFrames de Salida (ejemplos)
+# ------------------------------------------------------------------------------
+def generar_df_f_expl_unid(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filtra Tipo_Pack == 'Unidad' y reordena/renombra columnas:
+      1) No Factura -> (misma)
+      2) Código Hijo -> Num Producto
+      3) Descripción -> Descripcion
+      4) Cantidad Und -> Qty_Unidades
+      5) Familia -> Familia De Producto
+      6) Observaciones -> (columna vacía)
+      7) Piso -> Zona
+    """
+    df_unid = df_consolidado[df_consolidado["Tipo_Pack"] == "Unidad"].copy()
+    required_cols = [
+        "No Factura",
+        "Num Producto",
+        "Descripcion",
+        "Qty_Unidades",
+        "Familia De Producto",
+        "Zona"
+    ]
+    for col in required_cols:
+        if col not in df_unid.columns:
+            raise ValueError(f"Falta la columna '{col}' en df_consolidado.")
+
+    df_unid["Observaciones"] = ""  # Columna vacía
+    df_unid.rename(columns={
+        "Num Producto": "Código Hijo",
+        "Descripcion": "Descripción",
+        "Qty_Unidades": "Cantidad Und",
+        "Familia De Producto": "Familia",
+        "Zona": "Piso"
+    }, inplace=True)
+
+    df_unid = df_unid[[
+        "No Factura",
+        "Código Hijo",
+        "Descripción",
+        "Cantidad Und",
+        "Familia",
+        "Observaciones",
+        "Piso"
+    ]]
+    return df_unid
+
+def generar_df_f_recepcion(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    """
+    Placeholder: aquí implementa la lógica real para df_f_recepción.
+    """
+    # Ejemplo: por ahora devolvemos el mismo df_consolidado
+    return df_consolidado.copy()
+
+def generar_df_expl_inner(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    """
+    Placeholder: aquí implementa la lógica real para df_expl_inner.
+    """
+    # Ejemplo: por ahora devolvemos el mismo df_consolidado
+    return df_consolidado.copy()
 
 ###############################################################################
 # 5. MENÚ LATERAL (A LA DERECHA) CON ICONOS BLANCOS
@@ -361,9 +585,18 @@ def get_access_token():
         authority=authority_url
     )
     result = app.acquire_token_for_client(scopes=scopes)
-    if "access_token" not in result:
-        st.error(f"No se pudo obtener el token: {result.get('error_description')}")
-        return None
+
+    if not result:
+        st.error("No se obtuvo ninguna respuesta al solicitar el token.")
+    else:
+        # Si 'result' no es None, verifica si tiene 'access_token' o si contiene 'error'
+        if 'access_token' in result:
+            # Maneja tu lógica con el token
+            access_token = result['access_token']
+            st.success("Token obtenido correctamente.")
+        else:
+            # Muestra el error completo o un mensaje amigable
+            st.error(f"No se obtuvo el token. Respuesta devuelta: {result}")
     return result["access_token"]
 
 ###############################################################################
@@ -521,17 +754,24 @@ def page_consolidar_oc():
     icon = "📝"
     st.markdown(f"## {icon} Registro de OC´s")
 
-    # Cargar archivo de entrada
-    uploaded_files = st.file_uploader("Subir uno o más CSV", type=["csv"], accept_multiple_files=True)
+    # A) Sección para cargar documentos
+    st.markdown("### Cargar Documentos")
+    uploaded_files = st.file_uploader("Subir uno o más CSV (Consolidado)", 
+                                      type=["csv"], 
+                                      accept_multiple_files=True)
     curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
+    plantilla_explosion_file = st.file_uploader("Cargar Plantilla Explosión Maui (XLSM)",
+                                                type=["xlsm"])
+    if plantilla_explosion_file:
+        st.session_state["plantilla_explosion_file"] = plantilla_explosion_file
 
-    # Variables de entrada
+    # B) Variables de entrada
     contenedor = st.text_input("Contenedor:")
     referencia = st.text_input("Referencia:")
     fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
 
     if uploaded_files and curva_articulo_file:
-        # Procesar archivos
+        # 1. Procesar archivos para df_consolidado
         lista_df = []
         for upf in uploaded_files:
             try:
@@ -539,25 +779,23 @@ def page_consolidar_oc():
                 lista_df.append(df_temp)
             except Exception as e:
                 st.error(f"Error al leer {upf.name}: {e}")
-        
+
         if lista_df:
             df_consolidado = pd.concat(lista_df, ignore_index=True)
             df_consolidado.insert(0, "Shipment", contenedor)
             df_consolidado.insert(1, "Referencia", referencia)
             df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
 
-            # Guardar los datos cargados en session_state para persistencia
-            st.session_state["df_consolidado"] = df_consolidado
-            st.success("Archivos procesados correctamente.")
+            st.success("Archivos procesados correctamente (df_consolidado).")
 
-            # Procesar las columnas utilizando las funciones auxiliares
-            desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion","descripción"]]
+            # Buscar columna 'Descripcion' o 'Descripción'
+            desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion", "descripción"]]
             if not desc_cols:
                 st.error("No se encontró la columna 'Descripcion' en los CSV.")
                 return
             desc_col = desc_cols[0]
 
-            # Aplicar las funciones auxiliares
+            # 2. Aplicar funciones auxiliares iniciales
             df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
             df_consolidado["Código Marca"] = df_consolidado.apply(
                 lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
@@ -565,26 +803,131 @@ def page_consolidar_oc():
             )
             df_consolidado["Marca"] = df_consolidado["Código Marca"].apply(calcular_marca)
             df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
+            df_consolidado["Tipo_Pack"] = df_consolidado[desc_col].apply(calcular_tipo_pack)
 
-            # Guardar en session_state después de aplicar las funciones
-            st.session_state["df_consolidado"] = df_consolidado
-
-            # Mostrar tabla cargada
-            st.markdown("### Datos Consolidados")
-            interactive_table_no_autoupdate(df_consolidado, key="consolidado_oc")
-
-            # Cargar y mostrar archivo de Curva Artículo
+            # 3. Procesar archivo de Curva Artículo
             try:
                 df_curva_articulo = pd.read_csv(curva_articulo_file)
-                st.success("Archivo de Curva Artículo cargado correctamente.")
-                st.markdown("### Tabla de Curva Artículo")
-                interactive_table_no_autoupdate(df_curva_articulo, key="curva_articulo")
+
+                # Crear columna "Factor por Caja" en df_curva_articulo
+                df_curva_articulo = calcular_factor_por_caja(df_curva_articulo)
+
+                # Calcular columnas en df_consolidado que dependen del df_curva_articulo
+                df_consolidado = calcular_factor_caja(df_consolidado, df_curva_articulo)
+                df_consolidado = calcular_qty_inners(df_consolidado)
+                df_consolidado = calcular_qty_unidades(df_consolidado)
+
+                st.success("Curva Artículo procesada correctamente.")
+
+                # 4. Crear los dataframes derivados
+                df_f_recepcion = generar_df_f_recepcion(df_consolidado)
+                df_f_expl_unid = generar_df_f_expl_unid(df_consolidado)
+                df_expl_inner  = generar_df_expl_inner(df_consolidado)
+
+                # 5. Guardar en session_state para poder consultarlos
+                st.session_state["df_consolidado"]       = df_consolidado
+                st.session_state["df_curva_articulo"]    = df_curva_articulo
+                st.session_state["df_f_recepción"]       = df_f_recepcion
+                st.session_state["df_f_expl_unid"]       = df_f_expl_unid
+                st.session_state["df_expl_inner"]        = df_expl_inner
+
+                # 6. Mostrar df_consolidado final
+                st.markdown("### Tabla Consolidado OC's (Final)")
+                mostrar_y_descargar_dataframe(df_consolidado, "consolidado_oc_final")
+
+                # 7. Sección de "Consultar Formatos generados"
+                st.markdown("### Consultar Formatos Generados")
+                opciones = [
+                    "df_f_expl_unid",
+                    "df_curva_articulo",
+                    "df_consolidado",
+                    "df_f_recepción",
+                    "df_expl_inner"
+                ]
+                seleccion = st.selectbox("Selecciona un DataFrame para visualizar:", opciones)
+
+                if seleccion in st.session_state:
+                    df_seleccionado = st.session_state[seleccion]
+                    st.info(f"Mostrando: {seleccion}")
+                    mostrar_y_descargar_dataframe(df_seleccionado, seleccion)
+                else:
+                    st.warning("Aún no se ha generado el DataFrame seleccionado.")
+
+                # == BOTÓN PARA EXPORTAR LA PLANTILLA CON LOS 3 DFS (y macros) ==
+                if st.button("Exportar Plantilla Explosión"):
+                    try:
+                        if "plantilla_explosion_file" not in st.session_state:
+                            st.error("No se encontró la plantilla XLSM en session_state.")
+                            return
+
+                        # Recuperar DataFrames y variables
+                        df_f_recep = st.session_state["df_f_recepción"]
+                        df_f_unid  = st.session_state["df_f_expl_unid"]
+                        df_inner   = st.session_state["df_expl_inner"]
+                        # Contenedor, referencia, fecha
+                        contenedor_val = df_consolidado["Shipment"].unique()[0]
+                        referencia_val = df_consolidado["Referencia"].unique()[0]
+                        fecha_val      = df_consolidado["Fecha de Recepción"].unique()[0]
+
+                        # Convertir fecha a string (ajusta formato si deseas)
+                        if isinstance(fecha_val, pd.Timestamp):
+                            fecha_str = fecha_val.strftime("%Y%m%d")
+                        else:
+                            fecha_str = str(fecha_val)
+
+                        # Cargar la plantilla con macros
+                        plantilla_bytes = st.session_state["plantilla_explosion_file"]
+                        in_memory_file = BytesIO(plantilla_bytes.getvalue())
+                        wb = load_workbook(in_memory_file, keep_vba=True)
+
+                        # 1) Hoja "df_f_expl_unid"
+                        sheet_unid = wb["df_f_expl_unid"]
+                        sheet_unid["I2"] = contenedor_val
+                        sheet_unid["J2"] = referencia_val
+                        sheet_unid["K2"] = str(fecha_val)
+
+                        start_row = 9
+                        start_col = 3  # C
+                        for i, row_data in df_f_unid.iterrows():
+                            for j, value in enumerate(row_data):
+                                sheet_unid.cell(row=start_row + i, column=start_col + j, value=value)
+
+                        # 2) Hoja "df_f_recepción"
+                        sheet_recep = wb["df_f_recepción"]
+                        for i, row_data in df_f_recep.iterrows():
+                            for j, value in enumerate(row_data):
+                                sheet_recep.cell(row=start_row + i, column=start_col + j, value=value)
+
+                        # 3) Hoja "df_expl_inner"
+                        sheet_inner = wb["df_expl_inner"]
+                        for i, row_data in df_inner.iterrows():
+                            for j, value in enumerate(row_data):
+                                sheet_inner.cell(row=start_row + i, column=start_col + j, value=value)
+
+                        # Guardar en memoria
+                        out_file = BytesIO()
+                        file_name = f"Explosión_Maui_{contenedor_val}_{referencia_val}_{fecha_str}.xlsm"
+                        wb.save(out_file)
+                        out_file.seek(0)
+
+                        st.download_button(
+                            label="Descargar Archivo Explosión",
+                            data=out_file,
+                            file_name=file_name,
+                            mime="application/vnd.ms-excel.sheet.macroEnabled.12"
+                        )
+                        st.success(f"Plantilla exportada correctamente: {file_name}")
+
+                    except Exception as e:
+                        st.error(f"Ocurrió un error al exportar la plantilla: {e}")
+
             except Exception as e:
                 st.error(f"Error al cargar el archivo de Curva Artículo: {e}")
         else:
             st.warning("No se pudo consolidar ningún archivo.")
     else:
-        st.warning("Por favor, sube los archivos CSV.")
+        st.warning("Por favor, sube los archivos CSV y el archivo de Curva Artículo para continuar.")
+
                 
 
 ###############################################################################
@@ -638,7 +981,7 @@ def main():
         elif opcion == "Consultar BD":
             page_consultar_bd()
         elif opcion == "Salir":
-            icon = MENU_OPCIONES["Salir"]
+            icon = MENU_OPCIONES["Sadeflir"]
             st.markdown(f"## {icon} Salir")
             st.warning("Has salido del Sistema de Gestión de Abastecimiento. Cierra la pestaña o selecciona otra opción.")
 
