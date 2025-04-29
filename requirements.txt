@@ -5,3 +5,4 @@ streamlit-aggrid
 beautifulsoup4
 requests
 msal
+psycopg2-binary
