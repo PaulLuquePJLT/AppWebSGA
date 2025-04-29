@@ -12,6 +12,9 @@ import msal
 from urllib.parse import urlencode, urlparse, parse_qs
 import openpyxl
 from openpyxl import load_workbook
+import altair as alt
+import psycopg2
+from psycopg2 import sql
 
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
@@ -492,6 +495,115 @@ def generar_df_expl_inner(df_consolidado: pd.DataFrame) -> pd.DataFrame:
     # Ejemplo: por ahora devolvemos el mismo df_consolidado
     return df_consolidado.copy()
 
+def mostrar_resumen_oc(df_consolidado):
+    # 1. Cálculos
+    total_inners = df_consolidado["Qty_Inners"].sum()
+    total_unidades = df_consolidado["Qty_Unidades"].sum()
+
+    df_totales_marca = (
+        df_consolidado
+        .groupby("Marca", as_index=False)[["Qty_Inners", "Qty_Unidades"]]
+        .sum()
+    )
+    df_totales_zona = (
+        df_consolidado
+        .groupby("Zona", as_index=False)[["Qty_Inners", "Qty_Unidades"]]
+        .sum()
+    )
+
+    # 2. Mostrar resultados
+    st.markdown("#### Resumen Totales")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total Inners", f"{total_inners:,.0f}")
+    with col2:
+        st.metric("Total Unidades", f"{total_unidades:,.0f}")
+
+    # Tablas auxiliares
+    st.markdown("#### Totales por Marca")
+    st.table(df_totales_marca)  # Puedes usar st.table o st.dataframe
+
+    st.markdown("#### Totales por Zona")
+    st.table(df_totales_zona)
+
+def guardar_contenedor_bd(df):
+    """
+    Inserta cada fila de df en la tabla consolidado_oc, cuyas columnas coinciden 
+    con los encabezados:
+      Shipment, Referencia, Fecha de Recepción, Cliente, Proveedor, Direccion, 
+      No Factura, Fecha Limite, Fecha Factura, Familia De Producto, Num Producto,
+      Descripcion, Producto Nuevo, Huella, Huella Default, Recibo Habilitado,
+      Cantidad Esperada, Identificada, Cant Cajas, Saldos Un, Vol M3, Articulo Padre,
+      Recibida, Subfamilias, Código Marca, Marca, Zona, Tipo_Pack, Factor_Caja, 
+      Qty_Inners, Qty_Unidades
+    """
+    # 1) URL de conexión guardada en st.secrets (o variable de entorno)
+    db_url = st.secrets["db"]["url"]  # Reemplaza con tu método preferido si no usas st.secrets
+
+    # 2) Conectarse a la base de datos
+    conn = psycopg2.connect(db_url)
+    cursor = conn.cursor()
+
+    # 3) Preparar la sentencia INSERT (con comillas dobles para columnas con espacios)
+    insert_query = sql.SQL("""
+    INSERT INTO consolidado_oc (
+        "Shipment", "Referencia", "Fecha de Recepción", "Cliente", "Proveedor", "Direccion", 
+        "No Factura", "Fecha Limite", "Fecha Factura", "Familia De Producto", "Num Producto", 
+        "Descripcion", "Producto Nuevo", "Huella", "Huella Default", "Recibo Habilitado", 
+        "Cantidad Esperada", "Identificada", "Cant Cajas", "Saldos Un", "Vol M3", "Articulo Padre", 
+        "Recibida", "Subfamilias", "Código Marca", "Marca", "Zona", "Tipo_Pack", "Factor_Caja",
+        "Qty_Inners", "Qty_Unidades"
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
+            %s, %s, %s, %s, %s, %s, 
+            %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """)
+
+    # 4) Recorrer las filas del DataFrame e insertar
+    for _, row in df.iterrows():
+        # Si necesitas conversiones, hazlas aquí. Por ejemplo, int(...) para Qty_Inners
+        cursor.execute(
+            insert_query,
+            (
+                row.get("Shipment", None),
+                row.get("Referencia", None),
+                row.get("Fecha de Recepción", None),
+                row.get("Cliente", None),
+                row.get("Proveedor", None),
+                row.get("Direccion", None),
+                row.get("No Factura", None),
+                row.get("Fecha Limite", None),
+                row.get("Fecha Factura", None),
+                row.get("Familia De Producto", None),
+                row.get("Num Producto", None),
+                row.get("Descripcion", None),
+                row.get("Producto Nuevo", None),
+                row.get("Huella", None),
+                row.get("Huella Default", None),
+                row.get("Recibo Habilitado", None),
+                row.get("Cantidad Esperada", None),
+                row.get("Identificada", None),
+                row.get("Cant Cajas", None),
+                row.get("Saldos Un", None),
+                row.get("Vol M3", None),
+                row.get("Articulo Padre", None),
+                row.get("Recibida", None),
+                row.get("Subfamilias", None),
+                row.get("Código Marca", None),
+                row.get("Marca", None),
+                row.get("Zona", None),
+                row.get("Tipo_Pack", None),
+                row.get("Factor_Caja", None),
+                row.get("Qty_Inners", None),
+                row.get("Qty_Unidades", None)
+            )
+        )
+
+    # 5) Confirmar cambios y cerrar
+    conn.commit()
+    cursor.close()
+    conn.close()
+
 ###############################################################################
 # 5. MENÚ LATERAL (A LA DERECHA) CON ICONOS BLANCOS
 ###############################################################################
@@ -756,8 +868,8 @@ def page_consolidar_oc():
 
     # A) Sección para cargar documentos
     st.markdown("### Cargar Documentos")
-    uploaded_files = st.file_uploader("Subir uno o más CSV (Consolidado)", 
-                                      type=["csv"], 
+    uploaded_files = st.file_uploader("Subir uno o más CSV (Consolidado)",
+                                      type=["csv"],
                                       accept_multiple_files=True)
     curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
     plantilla_explosion_file = st.file_uploader("Cargar Plantilla Explosión Maui (XLSM)",
@@ -771,7 +883,6 @@ def page_consolidar_oc():
     fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
 
     if uploaded_files and curva_articulo_file:
-        # 1. Procesar archivos para df_consolidado
         lista_df = []
         for upf in uploaded_files:
             try:
@@ -795,7 +906,7 @@ def page_consolidar_oc():
                 return
             desc_col = desc_cols[0]
 
-            # 2. Aplicar funciones auxiliares iniciales
+            # Funciones auxiliares (ya definidas en tu proyecto)
             df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
             df_consolidado["Código Marca"] = df_consolidado.apply(
                 lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
@@ -805,121 +916,238 @@ def page_consolidar_oc():
             df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
             df_consolidado["Tipo_Pack"] = df_consolidado[desc_col].apply(calcular_tipo_pack)
 
-            # 3. Procesar archivo de Curva Artículo
             try:
                 df_curva_articulo = pd.read_csv(curva_articulo_file)
-
-                # Crear columna "Factor por Caja" en df_curva_articulo
                 df_curva_articulo = calcular_factor_por_caja(df_curva_articulo)
 
-                # Calcular columnas en df_consolidado que dependen del df_curva_articulo
                 df_consolidado = calcular_factor_caja(df_consolidado, df_curva_articulo)
                 df_consolidado = calcular_qty_inners(df_consolidado)
                 df_consolidado = calcular_qty_unidades(df_consolidado)
 
                 st.success("Curva Artículo procesada correctamente.")
 
-                # 4. Crear los dataframes derivados
                 df_f_recepcion = generar_df_f_recepcion(df_consolidado)
                 df_f_expl_unid = generar_df_f_expl_unid(df_consolidado)
                 df_expl_inner  = generar_df_expl_inner(df_consolidado)
 
-                # 5. Guardar en session_state para poder consultarlos
-                st.session_state["df_consolidado"]       = df_consolidado
-                st.session_state["df_curva_articulo"]    = df_curva_articulo
-                st.session_state["df_f_recepción"]       = df_f_recepcion
-                st.session_state["df_f_expl_unid"]       = df_f_expl_unid
-                st.session_state["df_expl_inner"]        = df_expl_inner
+                st.session_state["df_consolidado"]    = df_consolidado
+                st.session_state["df_curva_articulo"] = df_curva_articulo
+                st.session_state["df_f_recepción"]    = df_f_recepcion
+                st.session_state["df_f_expl_unid"]    = df_f_expl_unid
+                st.session_state["df_expl_inner"]     = df_expl_inner
 
-                # 6. Mostrar df_consolidado final
-                st.markdown("### Tabla Consolidado OC's (Final)")
+                # Inicializamos banderas en session_state
+                if "contenedor_registrado" not in st.session_state:
+                    st.session_state["contenedor_registrado"] = False
+                # Para mostrar el "toast"
+                if "show_toast" not in st.session_state:
+                    st.session_state["show_toast"] = False
+
+                # Título + Botón
+                col_title, col_reg = st.columns([0.7, 0.3])
+                with col_title:
+                    st.markdown("### Tabla Consolidado OC's (Final)")
+                with col_reg:
+                    if not st.session_state["contenedor_registrado"]:
+                        if st.button("Registrar Contenedor"):
+                            # guardar_contenedor_bd(df_consolidado) si lo requieres
+                            st.session_state["contenedor_registrado"] = True
+                            st.session_state["show_toast"] = True
+                    else:
+                        st.success("Contenedor ya registrado")
+
+                # Muestra el "toast" flotante si show_toast == True
+                if st.session_state["show_toast"]:
+                    toast_html = """
+                    <style>
+                    .toast-container {
+                        position: fixed;
+                        bottom: 20px;
+                        right: 20px;
+                        background-color: #fff;
+                        padding: 20px;
+                        border-radius: 8px;
+                        box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                        z-index: 9999;
+                        display: flex;
+                        align-items: center;
+                    }
+                    .toast-container img {
+                        margin-right: 10px;
+                    }
+                    </style>
+                    <div class="toast-container" id="myToast">
+                      <img src="https://cdn-icons-png.flaticon.com/512/190/190411.png" width="40"/>
+                      <div>
+                        <strong>Datos de Contenedor registrados correctamente</strong>
+                      </div>
+                    </div>
+                    <script>
+                    // Desaparecer a los 2 segundos
+                    setTimeout(function(){
+                       var t = document.getElementById("myToast");
+                       if(t){ t.style.display = "none"; }
+                    }, 2000);
+                    </script>
+                    """
+                    st.markdown(toast_html, unsafe_allow_html=True)
+                    # Después de inyectar, marcamos show_toast=False para que en próxima recarga no aparezca
+                    st.session_state["show_toast"] = False
+
+                # Resumen
+                if all(col in df_consolidado.columns for col in ["Qty_Inners", "Qty_Unidades"]):
+                    total_inners = df_consolidado["Qty_Inners"].sum()
+                    total_unidades = df_consolidado["Qty_Unidades"].sum()
+
+                    col_inn, col_unid = st.columns(2)
+                    with col_inn:
+                        c1, c2 = st.columns([0.25, 0.75])
+                        with c1:
+                            st.image("https://cdn-icons-png.freepik.com/512/679/679821.png", width=60)
+                        with c2:
+                            st.metric("Total Inners", f"{int(total_inners):,}")
+
+                    with col_unid:
+                        c3, c4 = st.columns([0.25, 0.75])
+                        with c3:
+                            st.image("https://cdn-icons-png.freepik.com/256/8441/8441417.png?semt=ais_hybrid",
+                                     width=60)
+                        with c4:
+                            st.metric("Total Unidades", f"{int(total_unidades):,}")
+
+                    df_marca_zona = (
+                        df_consolidado
+                        .groupby(["Marca", "Zona"], as_index=False)[["Qty_Inners", "Qty_Unidades"]]
+                        .sum()
+                    )
+                    df_marca_zona["Qty_Inners"] = df_marca_zona["Qty_Inners"].astype(int)
+                    df_marca_zona["Qty_Unidades"] = df_marca_zona["Qty_Unidades"].astype(int)
+
+                    st.markdown("#### Totales por Marca y Zona (Unificado)")
+                    st.table(df_marca_zona)
+
+                    if "Subfamilias" in df_consolidado.columns:
+                        df_subfam = df_consolidado.groupby("Subfamilias", as_index=False)[
+                            ["Qty_Inners", "Qty_Unidades"]
+                        ].sum()
+                        df_subfam["Total"] = df_subfam["Qty_Inners"] + df_subfam["Qty_Unidades"]
+                        df_subfam.sort_values("Total", ascending=False, inplace=True)
+
+                        df_subfam["Qty_Inners"] = df_subfam["Qty_Inners"].astype(int)
+                        df_subfam["Qty_Unidades"] = df_subfam["Qty_Unidades"].astype(int)
+                        df_subfam["Total"] = df_subfam["Total"].astype(int)
+
+                        col_subfam_table, col_subfam_chart = st.columns([1.3, 1])
+                        with col_subfam_table:
+                            st.markdown("#### Resumen por Subfamilia")
+                            st.table(df_subfam[["Subfamilias", "Qty_Inners", "Qty_Unidades", "Total"]])
+
+                        with col_subfam_chart:
+                            st.markdown("**Gráfico de Líneas: Qty_Inners por Subfamilia**")
+
+                            df_subfam_line = df_subfam[["Subfamilias", "Qty_Inners"]].copy()
+                            chart_line = alt.Chart(df_subfam_line).mark_line(point=True).encode(
+                                x=alt.X("Subfamilias:N", sort=None),
+                                y=alt.Y("Qty_Inners:Q"),
+                                tooltip=["Subfamilias", "Qty_Inners"]
+                            ).properties(width=400, height=300)
+
+                            chart_text = alt.Chart(df_subfam_line).mark_text(
+                                align='left', dx=5, dy=-5
+                            ).encode(
+                                x=alt.X("Subfamilias:N", sort=None),
+                                y=alt.Y("Qty_Inners:Q"),
+                                text=alt.Text("Qty_Inners:Q")
+                            )
+                            st.altair_chart(chart_line + chart_text, use_container_width=True)
+                    else:
+                        st.warning("No existe la columna 'Subfamilias' para el resumen.")
+                else:
+                    st.warning("No se encontraron columnas 'Qty_Inners' y/o 'Qty_Unidades' para el resumen.")
+
+                # Mostrar la tabla principal
                 mostrar_y_descargar_dataframe(df_consolidado, "consolidado_oc_final")
 
-                # 7. Sección de "Consultar Formatos generados"
-                st.markdown("### Consultar Formatos Generados")
-                opciones = [
-                    "df_f_expl_unid",
-                    "df_curva_articulo",
-                    "df_consolidado",
-                    "df_f_recepción",
-                    "df_expl_inner"
-                ]
-                seleccion = st.selectbox("Selecciona un DataFrame para visualizar:", opciones)
+                # Sección "Consultar Formatos Generados" y "Exportar"
+                if st.session_state["contenedor_registrado"]:
+                    st.markdown("### Consultar Formatos Generados")
+                    opciones = [
+                        "df_f_expl_unid",
+                        "df_curva_articulo",
+                        "df_consolidado",
+                        "df_f_recepción",
+                        "df_expl_inner"
+                    ]
+                    seleccion = st.selectbox("Selecciona un DataFrame para visualizar:", opciones)
 
-                if seleccion in st.session_state:
-                    df_seleccionado = st.session_state[seleccion]
-                    st.info(f"Mostrando: {seleccion}")
-                    mostrar_y_descargar_dataframe(df_seleccionado, seleccion)
+                    if seleccion in st.session_state:
+                        df_seleccionado = st.session_state[seleccion]
+                        st.info(f"Mostrando: {seleccion}")
+                        mostrar_y_descargar_dataframe(df_seleccionado, seleccion)
+                    else:
+                        st.warning("Aún no se ha generado el DataFrame seleccionado.")
+
+                    if st.button("Exportar Plantilla Explosión"):
+                        try:
+                            if "plantilla_explosion_file" not in st.session_state:
+                                st.error("No se encontró la plantilla XLSM en session_state.")
+                                return
+
+                            df_f_recep = st.session_state["df_f_recepción"]
+                            df_f_unid  = st.session_state["df_f_expl_unid"]
+                            df_inner   = st.session_state["df_expl_inner"]
+
+                            contenedor_val = df_consolidado["Shipment"].unique()[0]
+                            referencia_val = df_consolidado["Referencia"].unique()[0]
+                            fecha_val      = df_consolidado["Fecha de Recepción"].unique()[0]
+
+                            if isinstance(fecha_val, pd.Timestamp):
+                                fecha_str = fecha_val.strftime("%Y%m%d")
+                            else:
+                                fecha_str = str(fecha_val)
+
+                            plantilla_bytes = st.session_state["plantilla_explosion_file"]
+                            in_memory_file = BytesIO(plantilla_bytes.getvalue())
+                            wb = load_workbook(in_memory_file, keep_vba=True)
+
+                            sheet_unid = wb["df_f_expl_unid"]
+                            sheet_unid["I2"] = contenedor_val
+                            sheet_unid["J2"] = referencia_val
+                            sheet_unid["K2"] = str(fecha_val)
+
+                            start_row = 9
+                            start_col = 3
+                            for i, row_data in df_f_unid.iterrows():
+                                for j, value in enumerate(row_data):
+                                    sheet_unid.cell(row=start_row + i, column=start_col + j, value=value)
+
+                            sheet_recep = wb["df_f_recepción"]
+                            for i, row_data in df_f_recep.iterrows():
+                                for j, value in enumerate(row_data):
+                                    sheet_recep.cell(row=start_row + i, column=start_col + j, value=value)
+
+                            sheet_inner = wb["df_expl_inner"]
+                            for i, row_data in df_inner.iterrows():
+                                for j, value in enumerate(row_data):
+                                    sheet_inner.cell(row=start_row + i, column=start_col + j, value=value)
+
+                            out_file = BytesIO()
+                            file_name = f"Explosión_Maui_{contenedor_val}_{referencia_val}_{fecha_str}.xlsm"
+                            wb.save(out_file)
+                            out_file.seek(0)
+
+                            st.download_button(
+                                label="Descargar Archivo Explosión",
+                                data=out_file,
+                                file_name=file_name,
+                                mime="application/vnd.ms-excel.sheet.macroEnabled.12"
+                            )
+                            st.success(f"Plantilla exportada correctamente: {file_name}")
+
+                        except Exception as e:
+                            st.error(f"Ocurrió un error al exportar la plantilla: {e}")
                 else:
-                    st.warning("Aún no se ha generado el DataFrame seleccionado.")
-
-                # == BOTÓN PARA EXPORTAR LA PLANTILLA CON LOS 3 DFS (y macros) ==
-                if st.button("Exportar Plantilla Explosión"):
-                    try:
-                        if "plantilla_explosion_file" not in st.session_state:
-                            st.error("No se encontró la plantilla XLSM en session_state.")
-                            return
-
-                        # Recuperar DataFrames y variables
-                        df_f_recep = st.session_state["df_f_recepción"]
-                        df_f_unid  = st.session_state["df_f_expl_unid"]
-                        df_inner   = st.session_state["df_expl_inner"]
-                        # Contenedor, referencia, fecha
-                        contenedor_val = df_consolidado["Shipment"].unique()[0]
-                        referencia_val = df_consolidado["Referencia"].unique()[0]
-                        fecha_val      = df_consolidado["Fecha de Recepción"].unique()[0]
-
-                        # Convertir fecha a string (ajusta formato si deseas)
-                        if isinstance(fecha_val, pd.Timestamp):
-                            fecha_str = fecha_val.strftime("%Y%m%d")
-                        else:
-                            fecha_str = str(fecha_val)
-
-                        # Cargar la plantilla con macros
-                        plantilla_bytes = st.session_state["plantilla_explosion_file"]
-                        in_memory_file = BytesIO(plantilla_bytes.getvalue())
-                        wb = load_workbook(in_memory_file, keep_vba=True)
-
-                        # 1) Hoja "df_f_expl_unid"
-                        sheet_unid = wb["df_f_expl_unid"]
-                        sheet_unid["I2"] = contenedor_val
-                        sheet_unid["J2"] = referencia_val
-                        sheet_unid["K2"] = str(fecha_val)
-
-                        start_row = 9
-                        start_col = 3  # C
-                        for i, row_data in df_f_unid.iterrows():
-                            for j, value in enumerate(row_data):
-                                sheet_unid.cell(row=start_row + i, column=start_col + j, value=value)
-
-                        # 2) Hoja "df_f_recepción"
-                        sheet_recep = wb["df_f_recepción"]
-                        for i, row_data in df_f_recep.iterrows():
-                            for j, value in enumerate(row_data):
-                                sheet_recep.cell(row=start_row + i, column=start_col + j, value=value)
-
-                        # 3) Hoja "df_expl_inner"
-                        sheet_inner = wb["df_expl_inner"]
-                        for i, row_data in df_inner.iterrows():
-                            for j, value in enumerate(row_data):
-                                sheet_inner.cell(row=start_row + i, column=start_col + j, value=value)
-
-                        # Guardar en memoria
-                        out_file = BytesIO()
-                        file_name = f"Explosión_Maui_{contenedor_val}_{referencia_val}_{fecha_str}.xlsm"
-                        wb.save(out_file)
-                        out_file.seek(0)
-
-                        st.download_button(
-                            label="Descargar Archivo Explosión",
-                            data=out_file,
-                            file_name=file_name,
-                            mime="application/vnd.ms-excel.sheet.macroEnabled.12"
-                        )
-                        st.success(f"Plantilla exportada correctamente: {file_name}")
-
-                    except Exception as e:
-                        st.error(f"Ocurrió un error al exportar la plantilla: {e}")
+                    st.warning("Por favor, registre el contenedor para habilitar la exportación.")
 
             except Exception as e:
                 st.error(f"Error al cargar el archivo de Curva Artículo: {e}")
@@ -928,7 +1156,8 @@ def page_consolidar_oc():
     else:
         st.warning("Por favor, sube los archivos CSV y el archivo de Curva Artículo para continuar.")
 
-                
+
+
 
 ###############################################################################
 # 7. FUNCIÓN PRINCIPAL (NAVEGACIÓN)
