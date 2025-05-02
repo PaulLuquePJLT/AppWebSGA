@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import re
-from datetime import datetime
+from datetime import datetime,timedelta
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from io import BytesIO
 import uuid  # Asegúrate de importar uuid al inicio del archivo
@@ -15,6 +15,7 @@ from openpyxl import load_workbook
 import altair as alt
 import psycopg2
 from psycopg2 import sql
+from streamlit_option_menu import option_menu
 
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
@@ -46,8 +47,8 @@ st.markdown("""
 }
 /* Ajustar ancho (un poco más angosta) */
 section[data-testid="stSidebar"] {
-    min-width: 250px !important;
-    max-width: 250px !important;
+    min-width: 280px !important;
+    max-width: 280px !important;
     background-color: #001F3F !important;
     color: white !important;
 }
@@ -495,6 +496,24 @@ def generar_df_expl_inner(df_consolidado: pd.DataFrame) -> pd.DataFrame:
     # Ejemplo: por ahora devolvemos el mismo df_consolidado
     return df_consolidado.copy()
 
+def parsear_fecha(valor):
+    """
+    Convierte un número de fecha de Excel (por ejemplo, 45505.042083333334) en formato datetime.
+    Si no puede convertir el valor, lo devuelve como NaT.
+    """
+    try:
+        if pd.isna(valor):
+            return None
+        if isinstance(valor, (float, int)):  # Si es un valor numérico de Excel
+            base = datetime(1899, 12, 30)  # Base de fecha de Excel
+            delta = timedelta(days=valor)  # Días desde la fecha base
+            return base + delta  # Sumar la diferencia para obtener la fecha
+        else:
+            # Si es una fecha en formato de texto, intentamos convertirla a datetime
+            return pd.to_datetime(valor, errors='coerce')  # Coerce convierte errores en NaT
+    except Exception as e:
+        return None
+
 def mostrar_resumen_oc(df_consolidado):
     # 1. Cálculos
     total_inners = df_consolidado["Qty_Inners"].sum()
@@ -541,6 +560,10 @@ def guardar_contenedor_bd(df):
     db_url = st.secrets["db"]["url"]  # Reemplaza con tu método preferido si no usas st.secrets
 
     # 2) Conectarse a la base de datos
+    with conn.cursor() as cur:
+        cur.execute("SELECT version()")
+        print(cur.fetchone())
+
     conn = psycopg2.connect(db_url)
     cursor = conn.cursor()
 
@@ -608,12 +631,13 @@ def guardar_contenedor_bd(df):
 # 5. MENÚ LATERAL (A LA DERECHA) CON ICONOS BLANCOS
 ###############################################################################
 MENU_OPCIONES = {
-    "Inicio": "🏠",
-    "Realizar Análisis": "🔍",
-    "Registro de OC´s": "📝",
-    "Consultar BD": "📂",
-    "Salir": "🚪"
+    "Inicio": "house",
+    "Realizar Análisis": "search",
+    "Registro de OC´s": "pencil-square",
+    "Consultar BD": "folder",
+    "Salir": "door-closed"
 }
+
 
 def set_menu_selection():
     """Se asegura de que 'menu_selected' exista en st.session_state."""
@@ -624,8 +648,9 @@ def radio_menu_con_iconos():
     """
     Crea en la barra lateral:
       - Logo en la parte superior
-      - Radio con opciones (iconos + texto)
-      - Texto 'Developed by: PJLT' al final
+      - Menú de opciones con íconos (streamlit-option-menu)
+      - Botón "Iniciar sesión con OneDrive"
+      - Texto final "Developed by: PJLT"
     """
     with st.sidebar:
         # Logo superior
@@ -634,46 +659,69 @@ def radio_menu_con_iconos():
             use_container_width=True
         )
 
-        # Radio con iconos
-        set_menu_selection()
-        labels = [f"{MENU_OPCIONES[k]} {k}" for k in MENU_OPCIONES.keys()]
-        opciones_keys = list(MENU_OPCIONES.keys())
-        seleccion_actual = st.session_state["menu_selected"]
-        idx_seleccion_actual = opciones_keys.index(seleccion_actual)
+        # Convertimos MENU_OPCIONES en listas para el option_menu
+        names = list(MENU_OPCIONES.keys())   # ["Inicio", "Realizar Análisis", ...]
+        icons = list(MENU_OPCIONES.values()) # ["house", "search", "pencil-square", ...]
+        
+        # Determinar la opción por defecto (la que esté en session_state)
+        # o "Inicio" si no existe
+        default_idx = 0
+        if "menu_selected" in st.session_state and st.session_state["menu_selected"] in names:
+            default_idx = names.index(st.session_state["menu_selected"])
 
-        chosen_label = st.radio(
-            "Menú Principal",
-            labels,
-            index=idx_seleccion_actual,
-            key="radio_menu_key"
+        # Menú con streamlit-option-menu
+        # Ocultamos el título de menú (menu_title="")
+        # orientation="vertical" para ubicarlo vertical
+        # Ajustamos 'container' con background azul y 'nav-link' con texto blanco
+        seleccion = option_menu(
+            menu_title="",  # Sin título
+            options=names,
+            icons=icons,
+            menu_icon="cast",       # Ícono del menú principal
+            default_index=default_idx,
+            orientation="vertical",
+            styles={
+                "container": {
+                    "background-color": "#001F3F",   # Fondo azul
+                    "padding": "0px"
+                },
+                "nav-link": {
+                    "font-size": "14px",
+                    "text-align": "left",
+                    "margin": "0px",
+                    "--hover-color": "#0066CC",
+                    "color": "white"
+                },
+                "nav-link-selected": {
+                    "background-color": "#0078d4",
+                    "color": "white"
+                },
+            }
         )
 
-        # Crear espacio para mover el botón abajo, sin afectar el menú ni el logo
-        st.sidebar.markdown("<br><br><br><br>", unsafe_allow_html=True)  # Añadir espacio para el botón
+        # Separador para el botón (espacio extra)
+        st.markdown("<br><br>", unsafe_allow_html=True)
 
-        # Estilo del botón más pequeño y en la barra lateral
-        auth_url = get_authorization_url()  # Obtener el auth_url para el botón
-        st.sidebar.markdown(
+        # Botón de OneDrive
+        auth_url = get_authorization_url()  # Obtener la URL de autorización
+        st.markdown(
             f'<a href="{auth_url}" target="_blank">'
             f'<button style="background-color:#0078d4; color:white; padding:5px 10px; font-size:12px; border-radius:8px; width: 100%;">'
             'Iniciar sesión con OneDrive'
             '</button>'
-            '</a>', unsafe_allow_html=True
-        )
-
-        # Texto final con tamaño de fuente configurado
-        st.sidebar.markdown(
-            "<p style='text-align:center; font-size:12px;'>Developed by: PJLT</p>",  # Cambiar el tamaño de la fuente aquí
+            '</a>', 
             unsafe_allow_html=True
         )
 
-    # Determinar la opción elegida
-    for k, icono in MENU_OPCIONES.items():
-        if chosen_label.startswith(icono):
-            st.session_state["menu_selected"] = k
-            return k
+        # Texto final
+        st.markdown(
+            "<p style='text-align:center; font-size:12px; margin-top:30px;'>Developed by: PJLT</p>",
+            unsafe_allow_html=True
+        )
 
-    return seleccion_actual
+    # Guardamos la selección en session_state
+    st.session_state["menu_selected"] = seleccion
+    return seleccion
 
 ###############################################################################
 # 6. LECTURA DE token
@@ -718,7 +766,7 @@ def page_home():
     col1, col2 = st.columns([1,3])
     with col1:
         # Logotipo en la sección de inicio
-        st.image("https://www.dinet.com.pe/img/logo-dinet.png", width=120)
+        st.image("https://www.dinet.com.pe/img/logo-dinet.png", width=170)
     with col2:
         st.markdown("<h2 class='title'>Sistema de Gestión de Abastecimiento - MAUI</h2>", unsafe_allow_html=True)
         st.markdown("<p class='credit'>Developed by: <b>PJLT</b></p>", unsafe_allow_html=True)
@@ -777,112 +825,283 @@ def page_consultar_bd():
 
 
 def page_realizar_analisis():
-    icon = MENU_OPCIONES["Realizar Análisis"]
-    st.markdown(f"## {icon} Realizar Análisis")
+    st.markdown("## Análisis de Subfamilias con Clasificación")
 
-    set_directories()
-    anio = st.number_input("Año para filtrar", min_value=1990, max_value=2100, value=2024, step=1)
-    uploaded_file = st.file_uploader("Subir archivo XLSX/XLSB", type=["xlsx","xlsb"])
+    # 1) Seleccionar año a analizar. Por defecto año actual (ajusta a tu preferencia).
+    anio_predeterminado = datetime.now().year
+    anio_seleccionado = st.number_input(
+        "Seleccione año a analizar",
+        min_value=1990,
+        max_value=2100,
+        value=anio_predeterminado,
+        step=1
+    )
 
-    if st.button("Procesar Análisis"):
-        if not uploaded_file:
-            st.error("No se ha subido ningún archivo.")
-            return
+    # 2) Subir archivo histórico (XLSB/XLSX)
+    uploaded_file = st.file_uploader("Subir archivo histórico (.xlsb o .xlsx)", type=["xlsb", "xlsx"])
 
-        filename = uploaded_file.name
-        st.info(f"Archivo recibido: {filename}")
+    if not uploaded_file:
+        st.info("Por favor, sube el archivo histórico para continuar.")
+        return
 
-        try:
-            import io
-            content = uploaded_file.read()
-            if filename.endswith(".xlsb"):
-                df = pd.read_excel(io.BytesIO(content), engine='pyxlsb')
-            else:
-                df = pd.read_excel(io.BytesIO(content))
+    # 3) Si ya tenemos los datos procesados en session_state, no volvemos a procesar
+    if 'df_agrupado' in st.session_state:
+        df_agrupado = st.session_state['df_agrupado']
+        st.write("### Datos cargados previamente")
+        st.dataframe(df_agrupado)
+    else:
+        # Botón para procesar
+        if st.button("Procesar Análisis"):
+            try:
+                content = uploaded_file.read()
+                import io
+                if uploaded_file.name.endswith(".xlsb"):
+                    df = pd.read_excel(io.BytesIO(content), engine='pyxlsb')
+                else:
+                    df = pd.read_excel(io.BytesIO(content))
 
-            if 'fecha_despacho' in df.columns:
-                df['fecha_despacho'] = pd.to_datetime(
-                    df['fecha_despacho'],
-                    unit='d',
-                    origin='1899-12-30',
-                    errors='coerce'
-                )
+                # Verificar columna 'fecha_despacho'
+                if 'fecha_despacho' not in df.columns:
+                    st.error("No se encontró la columna 'fecha_despacho' en el archivo.")
+                    return
+                
+                # Mostrar los datos cargados antes de procesar las fechas
+                st.write("### Datos cargados:")
+                st.dataframe(df.head())  # Mostrar las primeras filas del dataframe
+
+                # Convertir la fecha, asumiendo formato dd/mm/yyyy => dayfirst=True
+                df['fecha_despacho'] = df['fecha_despacho'].apply(parsear_fecha)
+                
+                # Mostrar cuántas fechas se convirtieron
+                n_valido = df['fecha_despacho'].notna().sum()
+                n_total = len(df)
+                st.write(f"Se convirtieron {n_valido} fechas correctamente de un total de {n_total} registros.")
+
+                # Crear Mes y Año
                 df['Mes'] = df['fecha_despacho'].dt.month
                 df['Año'] = df['fecha_despacho'].dt.year
 
-            if 'Año' in df.columns:
-                df_anio = df[df['Año'] == anio].copy()
-            else:
-                df_anio = df.copy()
+                # Filtrar por el año seleccionado
+                df_anio = df[df['Año'] == anio_seleccionado].copy()
+                cantidad_en_anio = len(df_anio)
 
-            if df_anio.empty:
-                st.warning(f"No hay datos para el año {anio}.")
-                return
+                st.write(f"Registros filtrados para año {anio_seleccionado}: {cantidad_en_anio}")
 
-            if 'Cant_Unidad' not in df_anio.columns:
-                st.error("No se encontró la columna 'Cant_Unidad'.")
-                return
-            if 'Sub Familia' not in df_anio.columns:
-                st.error("No se encontró la columna 'Sub Familia'.")
-                return
-            if 'Mes' not in df_anio.columns:
-                st.error("No se encontró la columna 'Mes'.")
-                return
+                if df_anio.empty:
+                    st.warning(f"No hay datos para el año {anio_seleccionado}. Verifica el formato de fecha.")
+                    return
 
-            agrupado = df_anio.groupby(['Mes', 'Sub Familia'], as_index=False)['Cant_Unidad'].sum()
-            agrupado['Total_Mes'] = agrupado.groupby('Mes')['Cant_Unidad'].transform('sum')
-            agrupado['Porcentaje'] = (agrupado['Cant_Unidad'] / agrupado['Total_Mes'] * 100).round(2)
-            agrupado.sort_values(['Mes', 'Sub Familia'], inplace=True)
+                # Asegurar que existe la columna de unidades y la columna 'Descripción Padre'
+                if 'Cant_Unidad' not in df_anio.columns:
+                    st.error("No se encontró la columna 'Cant_Unidad'.")
+                    return
+                if 'Descripción Padre' not in df_anio.columns:
+                    st.error("No se encontró la columna 'Descripción Padre'.")
+                    return
 
-            output_file = f"porcentaje_subfamilias_{anio}.xlsx"
-            full_path = os.path.join('DATA_MAUI_PJLT', output_file)
-            agrupado.to_excel(full_path, index=False)
+                # Extraer Sub Familia a partir de 'Descripción Padre'
+                df_anio["Sub Familia"] = df_anio["Descripción Padre"].apply(extraer_descripcion)
 
-            st.success(f"Proceso finalizado. Archivo guardado en: {full_path}")
+                # Agrupar por Mes, Sub Familia
+                agrupado = df_anio.groupby(['Mes', 'Sub Familia'], as_index=False)['Cant_Unidad'].sum()
 
-            st.markdown("### Resultado (Editar sin re-run)")
-            df_table = interactive_table_no_autoupdate(agrupado, key="analisis")
+                # Calcular total del mes y porcentaje
+                agrupado['Total_Mes'] = agrupado.groupby('Mes')['Cant_Unidad'].transform('sum')
+                agrupado['Porcentaje'] = ((agrupado['Cant_Unidad'] / agrupado['Total_Mes']) * 100).round(2)
+                agrupado.sort_values(['Mes', 'Sub Familia'], inplace=True)
 
-            if st.button("Aplicar Cambios (Análisis)"):
-                st.session_state["df_analisis_editado"] = df_table
-                st.success("Cambios guardados en session_state. Se recargará la app.")
-                st.experimental_rerun()
+                # Crear la columna '&&' si se desea
+                agrupado["&&"] = agrupado["Mes"].astype(str) + agrupado["Sub Familia"].astype(str)
 
-            if "df_analisis_editado" in st.session_state:
-                st.markdown("#### Data en session_state (Análisis Editado):")
-                st.dataframe(st.session_state["df_analisis_editado"].head(20))
+                # Clasificar (Mezzanine o Selectivo) y comentarios
+                def clasificar(row):
+                    if row["Cant_Unidad"] > 200:
+                        return "Mezzanine"
+                    else:
+                        return "Selectivo"
 
-                if st.button("Exportar a Excel (Análisis Editado)"):
-                    out_name = f"{os.path.splitext(output_file)[0]}_editado.xlsx"
-                    st.session_state["df_analisis_editado"].to_excel(out_name, index=False)
-                    st.success(f"Archivo Excel (editado) guardado localmente: {out_name}")
+                agrupado["Clasificacion"] = agrupado.apply(clasificar, axis=1)
 
-        except Exception as e:
-            st.error(f"Ocurrió un error al procesar el archivo: {e}")
+                def comentarios(row):
+                    if row["Clasificacion"] == "Mezzanine":
+                        return f"Subfamilia {row['Sub Familia']} con despachos significativos."
+                    else:
+                        return f"Subfamilia {row['Sub Familia']} con bajos despachos."
 
+                agrupado["Comentarios"] = agrupado.apply(comentarios, axis=1)
 
-# Función principal para consolidar y procesar los archivos
+                # Guardar el dataframe procesado en session_state
+                st.session_state["df_agrupado"] = agrupado
+
+                # Mostrar tabla
+                st.markdown(f"### Resultado para Año {anio_seleccionado}")
+                st.dataframe(agrupado.head(50))  # Vista previa
+
+                # Mostrar algunos gráficos relevantes (ejemplo Altair)
+                st.markdown("### Gráficos Relevantes")
+                chart_data = agrupado.groupby("Sub Familia", as_index=False)["Cant_Unidad"].sum()
+                chart = alt.Chart(chart_data).mark_bar().encode(
+                    x=alt.X("Cant_Unidad:Q", title="Unidades Despachadas"),
+                    y=alt.Y("Sub Familia:N", sort="-x"),
+                    tooltip=["Sub Familia", "Cant_Unidad"]
+                ).properties(width=600, height=400)
+                st.altair_chart(chart, use_container_width=True)
+
+                # Botón para exportar a Excel
+                if st.button("Exportar Análisis a Excel"):
+                    from io import BytesIO
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        agrupado.to_excel(writer, index=False, sheet_name="Análisis_Subfamilias")
+                    output.seek(0)
+                    st.download_button(
+                        label="Descargar Excel",
+                        data=output,
+                        file_name=f"analisis_subfamilias_{anio_seleccionado}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+            except Exception as e:
+                st.error(f"Ocurrió un error procesando el archivo: {e}")
+
+    # 12) Subir la plantilla XLSM y actualizar
+    plantilla_file = st.file_uploader("Cargar _Plantilla_Explosión_Maui_v1.xlsm para actualizar subfamilias", 
+                                      type=["xlsm"])
+    if plantilla_file:
+        if st.button("Actualizar Plantilla y Exportar"):
+            try:
+                plantilla_bytes = plantilla_file.read()
+                in_memory_file = BytesIO(plantilla_bytes)
+                wb = load_workbook(in_memory_file, keep_vba=True)
+
+                sheet_name = "%_subfamilias"
+                if sheet_name not in wb.sheetnames:
+                    st.error(f"No se encontró la hoja '{sheet_name}' en la plantilla.")
+                    return
+
+                sheet = wb[sheet_name]
+                # Borrar filas desde la 2 hasta la última
+                max_row = sheet.max_row
+                if max_row > 1:
+                    sheet.delete_rows(2, max_row)
+
+                # Pegar encabezados en la fila 1
+                cols = list(agrupado.columns)
+                for col_idx, col_name in enumerate(cols, start=1):
+                    sheet.cell(row=1, column=col_idx, value=col_name)
+
+                # Pegar datos a partir de fila 2
+                for i, row_data in agrupado.iterrows():
+                    for j, col_name in enumerate(cols, start=1):
+                        sheet.cell(row=i+2, column=j, value=row_data[col_name])
+
+                # Guardar en memoria y exportar
+                out_file = BytesIO()
+                wb.save(out_file)
+                out_file.seek(0)
+
+                st.download_button(
+                    label="Descargar Plantilla Actualizada",
+                    data=out_file,
+                    file_name=f"_Plantilla_Explosión_{anio_seleccionado}_Actualizada.xlsm",
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12"
+                )
+
+                # Mostrar toast
+                toast_html = """
+                <style>
+                .toast-container {
+                    position: fixed;
+                    bottom: 20px;
+                    right: 20px;
+                    background-color: #fff;
+                    padding: 20px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                    z-index: 9999;
+                    display: flex;
+                    align-items: center;
+                }
+                .toast-container img {
+                    margin-right: 10px;
+                }
+                </style>
+                <div class="toast-container" id="myToast">
+                  <img src="https://cdn-icons-png.flaticon.com/512/190/190411.png" width="40"/>
+                  <div>
+                    <strong>Plantilla actualizada correctamente</strong>
+                  </div>
+                </div>
+                <script>
+                setTimeout(function(){
+                   var t = document.getElementById("myToast");
+                   if(t){ t.style.display = "none"; }
+                }, 2000);
+                </script>
+                """
+                st.markdown(toast_html, unsafe_allow_html=True)
+
+            except Exception as e:
+                st.error(f"Error al actualizar la plantilla: {e}")
 def page_consolidar_oc():
     icon = "📝"
     st.markdown(f"## {icon} Registro de OC´s")
 
-    # A) Sección para cargar documentos
+    # ---------- BLOQUE DE 3 COLUMNAS PARA CARGA -----------    
     st.markdown("### Cargar Documentos")
-    uploaded_files = st.file_uploader("Subir uno o más CSV (Consolidado)",
-                                      type=["csv"],
-                                      accept_multiple_files=True)
-    curva_articulo_file = st.file_uploader("Cargar Curva Artículo", type=["csv"])
-    plantilla_explosion_file = st.file_uploader("Cargar Plantilla Explosión Maui (XLSM)",
-                                                type=["xlsm"])
-    if plantilla_explosion_file:
-        st.session_state["plantilla_explosion_file"] = plantilla_explosion_file
+    col_consolidado, col_curva, col_plantilla = st.columns(3)
 
-    # B) Variables de entrada
-    contenedor = st.text_input("Contenedor:")
-    referencia = st.text_input("Referencia:")
-    fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
+    # Col 1: CSV Consolidado (con métrica de cantidad)
+    with col_consolidado:
+        st.markdown("**Cargar Ordenes de Compra (CSV)**")
+        uploaded_files = st.file_uploader(
+            "Subir uno o más CSV (Consolidado)",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="csv_consolidado",
+            label_visibility="collapsed"  # Ocultar label por defecto
+        )
+        n_consolidado = len(uploaded_files) if uploaded_files else 0
+        st.write(f"**Documentos**: {n_consolidado} archivos cargados")
 
+    # Col 2: CSV Curva Artículo (sin métrica)
+    with col_curva:
+        st.markdown("**Cargar Curva Artículo**")
+        curva_articulo_file = st.file_uploader(
+            "Cargar Curva Artículo",
+            type=["csv"],
+            key="csv_curva",
+            label_visibility="collapsed"
+        )
+
+    # Col 3: XLSM Plantilla Explosión (sin métrica)
+    with col_plantilla:
+        st.markdown("**Plantilla Explosión (XLSM)**")
+        plantilla_explosion_file = st.file_uploader(
+            "Cargar Plantilla Explosión Maui (XLSM)",
+            type=["xlsm"],
+            key="xlsm_plantilla",
+            label_visibility="collapsed"
+        )
+        if plantilla_explosion_file:
+            st.session_state["plantilla_explosion_file"] = plantilla_explosion_file
+
+    # ---------- BLOQUE DE 3 COLUMNAS PARA DATOS CONTENEDOR/REFERENCIA/FECHA -----------    
+    st.markdown("### Datos de Contenedor")
+    col_contenedor, col_referencia, col_fecha = st.columns(3)
+
+    with col_contenedor:
+        contenedor = st.text_input("Contenedor:")
+
+    with col_referencia:
+        referencia = st.text_input("Referencia:")
+
+    with col_fecha:
+        fecha_recepcion = st.date_input("Fecha de Recepción:", datetime.now())
+
+    # ---------- VALIDACIÓN PARA PROCESAR ----------
     if uploaded_files and curva_articulo_file:
+        # 1. Procesar CSV(s) Consolidados
         lista_df = []
         for upf in uploaded_files:
             try:
@@ -897,7 +1116,7 @@ def page_consolidar_oc():
             df_consolidado.insert(1, "Referencia", referencia)
             df_consolidado.insert(2, "Fecha de Recepción", fecha_recepcion if fecha_recepcion else "")
 
-            st.success("Archivos procesados correctamente (df_consolidado).")
+            st.success("Archivos consolidados procesados correctamente.")
 
             # Buscar columna 'Descripcion' o 'Descripción'
             desc_cols = [c for c in df_consolidado.columns if c.lower() in ["descripcion", "descripción"]]
@@ -906,7 +1125,7 @@ def page_consolidar_oc():
                 return
             desc_col = desc_cols[0]
 
-            # Funciones auxiliares (ya definidas en tu proyecto)
+            # Funciones auxiliares
             df_consolidado["Subfamilias"] = df_consolidado[desc_col].apply(extraer_descripcion)
             df_consolidado["Código Marca"] = df_consolidado.apply(
                 lambda row: extraer_codigo_marca(row[desc_col], row["Subfamilias"]),
@@ -916,6 +1135,7 @@ def page_consolidar_oc():
             df_consolidado["Zona"] = df_consolidado["Marca"].apply(calcular_zona)
             df_consolidado["Tipo_Pack"] = df_consolidado[desc_col].apply(calcular_tipo_pack)
 
+            # 2. Procesar CSV Curva Artículo
             try:
                 df_curva_articulo = pd.read_csv(curva_articulo_file)
                 df_curva_articulo = calcular_factor_por_caja(df_curva_articulo)
@@ -926,6 +1146,7 @@ def page_consolidar_oc():
 
                 st.success("Curva Artículo procesada correctamente.")
 
+                # Generar DataFrames derivados
                 df_f_recepcion = generar_df_f_recepcion(df_consolidado)
                 df_f_expl_unid = generar_df_f_expl_unid(df_consolidado)
                 df_expl_inner  = generar_df_expl_inner(df_consolidado)
@@ -936,10 +1157,9 @@ def page_consolidar_oc():
                 st.session_state["df_f_expl_unid"]    = df_f_expl_unid
                 st.session_state["df_expl_inner"]     = df_expl_inner
 
-                # Inicializamos banderas en session_state
+                # Inicializamos
                 if "contenedor_registrado" not in st.session_state:
                     st.session_state["contenedor_registrado"] = False
-                # Para mostrar el "toast"
                 if "show_toast" not in st.session_state:
                     st.session_state["show_toast"] = False
 
@@ -950,13 +1170,13 @@ def page_consolidar_oc():
                 with col_reg:
                     if not st.session_state["contenedor_registrado"]:
                         if st.button("Registrar Contenedor"):
-                            # guardar_contenedor_bd(df_consolidado) si lo requieres
+                            # Llamar a guardar_contenedor_bd(df_consolidado) si procede
                             st.session_state["contenedor_registrado"] = True
                             st.session_state["show_toast"] = True
                     else:
                         st.success("Contenedor ya registrado")
 
-                # Muestra el "toast" flotante si show_toast == True
+                # Toast (opcional)
                 if st.session_state["show_toast"]:
                     toast_html = """
                     <style>
@@ -983,7 +1203,6 @@ def page_consolidar_oc():
                       </div>
                     </div>
                     <script>
-                    // Desaparecer a los 2 segundos
                     setTimeout(function(){
                        var t = document.getElementById("myToast");
                        if(t){ t.style.display = "none"; }
@@ -991,30 +1210,36 @@ def page_consolidar_oc():
                     </script>
                     """
                     st.markdown(toast_html, unsafe_allow_html=True)
-                    # Después de inyectar, marcamos show_toast=False para que en próxima recarga no aparezca
                     st.session_state["show_toast"] = False
 
-                # Resumen
+                # --- Resumen Didáctico ---
                 if all(col in df_consolidado.columns for col in ["Qty_Inners", "Qty_Unidades"]):
                     total_inners = df_consolidado["Qty_Inners"].sum()
                     total_unidades = df_consolidado["Qty_Unidades"].sum()
 
-                    col_inn, col_unid = st.columns(2)
-                    with col_inn:
-                        c1, c2 = st.columns([0.25, 0.75])
-                        with c1:
-                            st.image("https://cdn-icons-png.freepik.com/512/679/679821.png", width=60)
-                        with c2:
-                            st.metric("Total Inners", f"{int(total_inners):,}")
+                    # Sección de Resumen
+                    st.markdown("## Resumen de Inners y Unidades")
+                    st.caption("Vista rápida de totales y desglose por marca / zona")
 
-                    with col_unid:
-                        c3, c4 = st.columns([0.25, 0.75])
-                        with c3:
-                            st.image("https://cdn-icons-png.freepik.com/256/8441/8441417.png?semt=ais_hybrid",
-                                     width=60)
-                        with c4:
-                            st.metric("Total Unidades", f"{int(total_unidades):,}")
+                    # Tarjetas horizontales
+                    c_inners, c_units = st.columns(2)
+                    with c_inners:
+                        st.markdown("""
+                        <div style="background-color:#f8f9fa; padding:15px; border-radius:8px;">
+                          <h4 style="margin:0;">Total Inners</h4>
+                          <p style="font-size:35px; margin:0; color:#007BFF;">""" + f"{int(total_inners):,}" + """</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with c_units:
+                        st.markdown("""
+                        <div style="background-color:#f8f9fa; padding:15px; border-radius:8px;">
+                          <h4 style="margin:0;">Total Unidades</h4>
+                          <p style="font-size:35px; margin:0; color:#28a745;">""" + f"{int(total_unidades):,}" + """</p>
+                        </div>
+                        """, unsafe_allow_html=True)
 
+                    # Tabla por Marca y Zona con un estilo
+                    st.markdown("#### Desglose por Marca y Zona")
                     df_marca_zona = (
                         df_consolidado
                         .groupby(["Marca", "Zona"], as_index=False)[["Qty_Inners", "Qty_Unidades"]]
@@ -1023,49 +1248,39 @@ def page_consolidar_oc():
                     df_marca_zona["Qty_Inners"] = df_marca_zona["Qty_Inners"].astype(int)
                     df_marca_zona["Qty_Unidades"] = df_marca_zona["Qty_Unidades"].astype(int)
 
-                    st.markdown("#### Totales por Marca y Zona (Unificado)")
-                    st.table(df_marca_zona)
+                    st.dataframe(
+                        df_marca_zona.style.highlight_max(subset=["Qty_Inners", "Qty_Unidades"], color="#d4edda")
+                    )
 
                     if "Subfamilias" in df_consolidado.columns:
-                        df_subfam = df_consolidado.groupby("Subfamilias", as_index=False)[
-                            ["Qty_Inners", "Qty_Unidades"]
-                        ].sum()
+                        st.markdown("#### Gráfico de Subfamilias (Inners vs Unidades)")
+                        df_subfam = (
+                            df_consolidado
+                            .groupby("Subfamilias", as_index=False)[["Qty_Inners", "Qty_Unidades"]]
+                            .sum()
+                        )
                         df_subfam["Total"] = df_subfam["Qty_Inners"] + df_subfam["Qty_Unidades"]
                         df_subfam.sort_values("Total", ascending=False, inplace=True)
 
-                        df_subfam["Qty_Inners"] = df_subfam["Qty_Inners"].astype(int)
-                        df_subfam["Qty_Unidades"] = df_subfam["Qty_Unidades"].astype(int)
-                        df_subfam["Total"] = df_subfam["Total"].astype(int)
+                        # Gráfico con Altair
+                        chart_data = df_subfam.melt(id_vars="Subfamilias", value_vars=["Qty_Inners", "Qty_Unidades"],
+                                                    var_name="Tipo", value_name="Cantidad")
+                        chart = alt.Chart(chart_data).mark_bar().encode(
+                            x=alt.X("Cantidad:Q", title="Cantidad"),
+                            y=alt.Y("Subfamilias:N", sort="-x"),
+                            color="Tipo:N",
+                            tooltip=["Subfamilias", "Tipo", "Cantidad"]
+                        ).properties(width=600, height=400)
 
-                        col_subfam_table, col_subfam_chart = st.columns([1.3, 1])
-                        with col_subfam_table:
-                            st.markdown("#### Resumen por Subfamilia")
-                            st.table(df_subfam[["Subfamilias", "Qty_Inners", "Qty_Unidades", "Total"]])
+                        st.altair_chart(chart, use_container_width=True)
 
-                        with col_subfam_chart:
-                            st.markdown("**Gráfico de Líneas: Qty_Inners por Subfamilia**")
-
-                            df_subfam_line = df_subfam[["Subfamilias", "Qty_Inners"]].copy()
-                            chart_line = alt.Chart(df_subfam_line).mark_line(point=True).encode(
-                                x=alt.X("Subfamilias:N", sort=None),
-                                y=alt.Y("Qty_Inners:Q"),
-                                tooltip=["Subfamilias", "Qty_Inners"]
-                            ).properties(width=400, height=300)
-
-                            chart_text = alt.Chart(df_subfam_line).mark_text(
-                                align='left', dx=5, dy=-5
-                            ).encode(
-                                x=alt.X("Subfamilias:N", sort=None),
-                                y=alt.Y("Qty_Inners:Q"),
-                                text=alt.Text("Qty_Inners:Q")
-                            )
-                            st.altair_chart(chart_line + chart_text, use_container_width=True)
                     else:
                         st.warning("No existe la columna 'Subfamilias' para el resumen.")
                 else:
                     st.warning("No se encontraron columnas 'Qty_Inners' y/o 'Qty_Unidades' para el resumen.")
 
-                # Mostrar la tabla principal
+                # ---- Mostrar la tabla principal
+                st.markdown("### Tabla Consolidado (Detalle)")
                 mostrar_y_descargar_dataframe(df_consolidado, "consolidado_oc_final")
 
                 # Sección "Consultar Formatos Generados" y "Exportar"
@@ -1147,16 +1362,14 @@ def page_consolidar_oc():
                         except Exception as e:
                             st.error(f"Ocurrió un error al exportar la plantilla: {e}")
                 else:
-                    st.warning("Por favor, registre el contenedor para habilitar la exportación.")
+                    st.warning("Por favor, registre el contenedor para habilitar la exportación.") 
 
             except Exception as e:
-                st.error(f"Error al cargar el archivo de Curva Artículo: {e}")
+                st.error(f"Ocurrió un error al cargar el archivo de Curva Artículo: {e}")
         else:
             st.warning("No se pudo consolidar ningún archivo.")
     else:
         st.warning("Por favor, sube los archivos CSV y el archivo de Curva Artículo para continuar.")
-
-
 
 
 ###############################################################################
