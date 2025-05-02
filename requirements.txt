@@ -6,3 +6,4 @@ beautifulsoup4
 requests
 msal
 psycopg2-binary
+streamlit-option-menu
