@@ -645,52 +645,37 @@ def set_menu_selection():
         st.session_state["menu_selected"] = "Inicio"
 
 def radio_menu_con_iconos():
-    """
-    Crea en la barra lateral:
-      - Logo en la parte superior
-      - Menú de opciones con íconos (streamlit-option-menu)
-      - Botón "Iniciar sesión con OneDrive"
-      - Texto final "Developed by: PJLT"
-    """
+    MENU_OPCIONES = {
+        "Inicio": "house",
+        "Realizar Análisis": "search",
+        "Registro de OC´s": "pencil-square",
+        "Consultar BD": "folder",
+        "Salir": "door-closed"
+    }
+    names = list(MENU_OPCIONES.keys())   # ["Inicio", "Realizar Análisis", ...]
+    icons = list(MENU_OPCIONES.values()) # ["house", "search", ...]
+
     with st.sidebar:
-        # Logo superior
         st.image(
             "https://blogger.googleusercontent.com/img/a/AVvXsEgG46LCtcs4m21eiV-0iDqPHZpdfuEEQrJAqwKNY2WPZWdaC1eoAokveaOPXpitT2a_vsKB7zCnxhRfadp0Edz0q5CcfERwYVzrTZSIeeay_o31XrYlqRxocgNau6kWPjAA61uD42zK--pQlZ6wsyIp97mKU53kHZO-yZXjp_wMNv6Coo_CMiitELregplf=w320-h320",
             use_container_width=True
         )
-
-        # Convertimos MENU_OPCIONES en listas para el option_menu
-        names = list(MENU_OPCIONES.keys())   # ["Inicio", "Realizar Análisis", ...]
-        icons = list(MENU_OPCIONES.values()) # ["house", "search", "pencil-square", ...]
-        
-        # Determinar la opción por defecto (la que esté en session_state)
-        # o "Inicio" si no existe
-        default_idx = 0
-        if "menu_selected" in st.session_state and st.session_state["menu_selected"] in names:
-            default_idx = names.index(st.session_state["menu_selected"])
-
-        # Menú con streamlit-option-menu
-        # Ocultamos el título de menú (menu_title="")
-        # orientation="vertical" para ubicarlo vertical
-        # Ajustamos 'container' con background azul y 'nav-link' con texto blanco
+        # Menú con option_menu
         seleccion = option_menu(
-            menu_title="",  # Sin título
+            menu_title="",
             options=names,
             icons=icons,
-            menu_icon="cast",       # Ícono del menú principal
-            default_index=default_idx,
+            menu_icon="cast",
             orientation="vertical",
+            key="menu_selected",  # <--- Aquí es donde dejamos que Streamlit maneje el estado
             styles={
-                "container": {
-                    "background-color": "#001F3F",   # Fondo azul
-                    "padding": "0px"
-                },
+                "container": {"background-color": "#001F3F"},
                 "nav-link": {
                     "font-size": "14px",
                     "text-align": "left",
                     "margin": "0px",
                     "--hover-color": "#0066CC",
-                    "color": "white"
+                    "color": "white",
                 },
                 "nav-link-selected": {
                     "background-color": "#0078d4",
@@ -699,29 +684,12 @@ def radio_menu_con_iconos():
             }
         )
 
-        # Separador para el botón (espacio extra)
         st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center; font-size:12px; margin-top:30px;'>Developed by: PJLT</p>", 
+                    unsafe_allow_html=True)
 
-        # Botón de OneDrive
-        auth_url = get_authorization_url()  # Obtener la URL de autorización
-        st.markdown(
-            f'<a href="{auth_url}" target="_blank">'
-            f'<button style="background-color:#0078d4; color:white; padding:5px 10px; font-size:12px; border-radius:8px; width: 100%;">'
-            'Iniciar sesión con OneDrive'
-            '</button>'
-            '</a>', 
-            unsafe_allow_html=True
-        )
-
-        # Texto final
-        st.markdown(
-            "<p style='text-align:center; font-size:12px; margin-top:30px;'>Developed by: PJLT</p>",
-            unsafe_allow_html=True
-        )
-
-    # Guardamos la selección en session_state
-    st.session_state["menu_selected"] = seleccion
     return seleccion
+
 
 ###############################################################################
 # 6. LECTURA DE token
@@ -1377,22 +1345,22 @@ def page_consolidar_oc():
 ###############################################################################
 # Función principal
 def main():
-    # Si el usuario ya ha iniciado sesión
+    # (1) Todo tu bloque de autenticación (OneDrive) se mantiene igual:
     auth_code = get_auth_code_from_url()
     if auth_code:
         # Intercambiamos el código por un token de acceso
         result = get_access_token_from_code(auth_code)
-        if 'access_token' in result:
-            access_token = result['access_token']
+        if "access_token" in result:
+            access_token = result["access_token"]
             st.success("Autenticación exitosa. Accediendo a OneDrive...")
-            
+
             # Mostrar que está conectado a OneDrive
             email = get_user_email(access_token)
             if email:
                 st.write(f"Conectado con OneDrive como: {email}")
             else:
                 st.error("No se pudo obtener el correo electrónico del usuario.")
-            
+
             # Listar archivos de OneDrive
             files = list_onedrive_files(access_token)
             if files:
@@ -1408,9 +1376,10 @@ def main():
         st.write("Para acceder a los archivos de OneDrive, por favor inicie sesión.")
         login_button()
 
-    # Continuar con la interfaz de la aplicación Streamlit
+    # (2) Llamamos a la función que crea el menú, sin manipular manualmente el session_state:
     opcion = radio_menu_con_iconos()
 
+    # (3) El resto de tu aplicación con if/elif en base a 'opcion':
     with st.container():
         st.markdown("<div class='main-container'>", unsafe_allow_html=True)
 
@@ -1423,9 +1392,13 @@ def main():
         elif opcion == "Consultar BD":
             page_consultar_bd()
         elif opcion == "Salir":
-            icon = MENU_OPCIONES["Sadeflir"]
+            # Ojo: si usas 'MENU_OPCIONES["Sadeflir"]' pero tu dict se llama "Salir",
+            # esto generará error. Asegúrate de que coincida la clave. 
+            # Por ejemplo, si tu menú usa 'Salir', hazlo así:
+            icon = MENU_OPCIONES["Salir"]
             st.markdown(f"## {icon} Salir")
-            st.warning("Has salido del Sistema de Gestión de Abastecimiento. Cierra la pestaña o selecciona otra opción.")
+            st.warning("Has salido del Sistema de Gestión de Abastecimiento. "
+                       "Cierra la pestaña o selecciona otra opción.")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
