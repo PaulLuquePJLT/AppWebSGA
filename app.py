@@ -734,7 +734,7 @@ def page_home():
     col1, col2 = st.columns([1,3])
     with col1:
         # Logotipo en la sección de inicio
-        st.image("https://www.dinet.com.pe/img/logo-dinet.png", width=170)
+        st.image("https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS-1lNB80yihWhLSgcsLbblfaUkLGdFNZXmCg&s", width=170)
     with col2:
         st.markdown("<h2 class='title'>Sistema de Gestión de Abastecimiento - MAUI</h2>", unsafe_allow_html=True)
         st.markdown("<p class='credit'>Developed by: <b>PJLT</b></p>", unsafe_allow_html=True)
