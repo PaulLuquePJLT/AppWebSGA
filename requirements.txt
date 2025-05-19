@@ -8,3 +8,4 @@ msal
 psycopg2-binary
 streamlit-option-menu
 pyxlsb
+sqlmodel==0.0.8
