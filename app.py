@@ -1,3 +1,4 @@
+from configparser import ConfigParser
 import streamlit as st
 import pandas as pd
 import os
@@ -16,6 +17,14 @@ import altair as alt
 import psycopg2
 from psycopg2 import sql
 from streamlit_option_menu import option_menu
+from psycopg2.extras import RealDictCursor
+from sqlmodel import create_engine, Session
+from sqlmodel import Field, SQLModel
+from database import guardar_contenedor_bd
+from database import get_session, OCMaui
+from sqlmodel import select
+from openpyxl.utils.dataframe import dataframe_to_rows
+
 
 ###############################################################################
 # 1. CONFIGURACIÓN INICIAL STREAMLIT
@@ -484,17 +493,106 @@ def generar_df_f_expl_unid(df_consolidado: pd.DataFrame) -> pd.DataFrame:
 
 def generar_df_f_recepcion(df_consolidado: pd.DataFrame) -> pd.DataFrame:
     """
-    Placeholder: aquí implementa la lógica real para df_f_recepción.
+    Genera el DataFrame df_f_recepcion con columnas específicas
+    basadas en df_consolidado, solo para los registros cuyo valor en 
+    la columna 'Tipo_Pack' sea 'Inner'. También añade la columna 'Piso',
+    que toma el valor de la columna 'Zona' del df_consolidado.
     """
-    # Ejemplo: por ahora devolvemos el mismo df_consolidado
-    return df_consolidado.copy()
 
-def generar_df_expl_inner(df_consolidado: pd.DataFrame) -> pd.DataFrame:
+    # Filtrar los registros donde "Tipo_Pack" sea "Inner"
+    df_consolidado_inner = df_consolidado[df_consolidado["Tipo_Pack"] == "Inner"]
+
+    # Crear un DataFrame nuevo con las columnas indicadas
+    df_recepcion = pd.DataFrame()
+
+    # 1) "No Factura"
+    df_recepcion["No Factura"] = df_consolidado_inner["No Factura"]
+
+    # 2) "Familia" (viene de "Familia De Producto")
+    df_recepcion["Familia"] = df_consolidado_inner["Familia De Producto"]
+
+    # 3) "Código Padre" (viene de "Num Producto")
+    df_recepcion["Código Padre"] = df_consolidado_inner["Num Producto"]
+
+    # 4) "Descripcion" (viene de "Descripcion")
+    df_recepcion["Descripcion"] = df_consolidado_inner["Descripcion"]
+
+    # 5) "Cant. Inner" (viene de "Qty_Inners")
+    df_recepcion["Cant. Inner"] = df_consolidado_inner["Qty_Inners"]
+
+    # 6) "Cant. Unidades" (viene de "Qty_Unidades")
+    df_recepcion["Cant. Unidades"] = df_consolidado_inner["Qty_Unidades"]
+
+    # 7) "Cant. Alm. Inner (20%)" => entero de (Qty_Inners * 0.2)
+    df_recepcion["Cant. Alm. Inner (20%)"] = (
+        df_consolidado_inner["Qty_Inners"] * 0.2
+    ).astype(int)
+
+    # 8) "Cant. Alm. Und (80%)" => entero de (Qty_Inners * 0.8)
+    df_recepcion["Cant. Alm. Und (80%)"] = (
+        df_consolidado_inner["Qty_Inners"] * 0.8
+    ).astype(int)
+
+    # 9) "Sub Familia" (viene de "Subfamilias")
+    df_recepcion["Sub Familia"] = df_consolidado_inner["Subfamilias"]
+
+    # 10) Añadir la columna "Piso" con el mismo valor que la columna "Zona"
+    df_recepcion["Piso"] = df_consolidado_inner["Zona"]
+
+    # Eliminar las filas donde "Tipo_Pack" sea "Unidad" para evitar filas vacías
+    df_recepcion = df_recepcion[df_consolidado["Tipo_Pack"] != "Unidad"]
+
+    return df_recepcion
+
+
+def generar_df_expl_inner(df_f_recepcion: pd.DataFrame, 
+                          df_curva_articulo: pd.DataFrame) -> pd.DataFrame:
     """
-    Placeholder: aquí implementa la lógica real para df_expl_inner.
+    Genera el DataFrame df_expl_inner uniendo df_f_recepcion con df_curva_articulo.
+    - 'Código Padre' en df_f_recepción se asume que coincide con 'Prtnum Padre' en df_curva_articulo
+    - Calcula las columnas según la estructura deseada.
     """
-    # Ejemplo: por ahora devolvemos el mismo df_consolidado
-    return df_consolidado.copy()
+
+    # Unir por "Código Padre" (izquierda) con "Prtnum Padre" (derecha)
+    df_merged = df_f_recepcion.merge(
+        df_curva_articulo, 
+        left_on="Código Padre", 
+        right_on="Prtnum Padre", 
+        how="left"
+    )
+
+    # Crear nuevo df con las columnas en el orden deseado:
+    df_expl_inner = pd.DataFrame()
+
+    df_expl_inner["No Factura"] = df_merged["No Factura"]
+    df_expl_inner["Código Padre"] = df_merged["Código Padre"]
+
+    # "Can. Cód. Padre (Inner)" = 'Cant. Alm. Und (80%)' de df_f_recepción
+    df_expl_inner["Can. Cód. Padre (Inner)"] = df_merged["Cant. Alm. Und (80%)"]
+
+    # "Código Hijo" = 'Prtnum Hijo' de la curva
+    df_expl_inner["Código Hijo"] = df_merged["Prtnum Hijo"]
+
+    # "Factor Caja" = 'Factor' de la curva (asegúrate del nombre de tu columna)
+    df_expl_inner["Factor Caja"] = df_merged["Factor por Caja"]
+
+    # "Factor Hijo (Und)" = 'Cantidad Empleada' de la curva
+    df_expl_inner["Factor Hijo (Und)"] = df_merged["Cantidad Empleada"]
+
+    # "Cant. Alm. Und" = producto de "Factor Hijo (Und)" × "Can. Cód. Padre (Inner)"
+    df_expl_inner["Cant. Alm. Und"] = (
+        df_expl_inner["Factor Hijo (Und)"] 
+        * df_expl_inner["Can. Cód. Padre (Inner)"]
+    )
+
+    # "Cant. Fisico. Und" => columna en blanco
+    df_expl_inner["Cant. Fisico. Und"] = ""
+
+    # "Piso" => viene de df_f_recepción
+    df_expl_inner["Piso"] = df_merged["Piso"]
+
+    return df_expl_inner
+
 
 def parsear_fecha(valor):
     """
@@ -513,6 +611,7 @@ def parsear_fecha(valor):
             return pd.to_datetime(valor, errors='coerce')  # Coerce convierte errores en NaT
     except Exception as e:
         return None
+    
 
 def mostrar_resumen_oc(df_consolidado):
     # 1. Cálculos
@@ -545,87 +644,6 @@ def mostrar_resumen_oc(df_consolidado):
     st.markdown("#### Totales por Zona")
     st.table(df_totales_zona)
 
-def guardar_contenedor_bd(df):
-    """
-    Inserta cada fila de df en la tabla consolidado_oc, cuyas columnas coinciden 
-    con los encabezados:
-      Shipment, Referencia, Fecha de Recepción, Cliente, Proveedor, Direccion, 
-      No Factura, Fecha Limite, Fecha Factura, Familia De Producto, Num Producto,
-      Descripcion, Producto Nuevo, Huella, Huella Default, Recibo Habilitado,
-      Cantidad Esperada, Identificada, Cant Cajas, Saldos Un, Vol M3, Articulo Padre,
-      Recibida, Subfamilias, Código Marca, Marca, Zona, Tipo_Pack, Factor_Caja, 
-      Qty_Inners, Qty_Unidades
-    """
-    # 1) URL de conexión guardada en st.secrets (o variable de entorno)
-    db_url = st.secrets["db"]["url"]  # Reemplaza con tu método preferido si no usas st.secrets
-
-    # 2) Conectarse a la base de datos
-    with conn.cursor() as cur:
-        cur.execute("SELECT version()")
-        print(cur.fetchone())
-
-    conn = psycopg2.connect(db_url)
-    cursor = conn.cursor()
-
-    # 3) Preparar la sentencia INSERT (con comillas dobles para columnas con espacios)
-    insert_query = sql.SQL("""
-    INSERT INTO consolidado_oc (
-        "Shipment", "Referencia", "Fecha de Recepción", "Cliente", "Proveedor", "Direccion", 
-        "No Factura", "Fecha Limite", "Fecha Factura", "Familia De Producto", "Num Producto", 
-        "Descripcion", "Producto Nuevo", "Huella", "Huella Default", "Recibo Habilitado", 
-        "Cantidad Esperada", "Identificada", "Cant Cajas", "Saldos Un", "Vol M3", "Articulo Padre", 
-        "Recibida", "Subfamilias", "Código Marca", "Marca", "Zona", "Tipo_Pack", "Factor_Caja",
-        "Qty_Inners", "Qty_Unidades"
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
-            %s, %s, %s, %s, %s, %s, 
-            %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """)
-
-    # 4) Recorrer las filas del DataFrame e insertar
-    for _, row in df.iterrows():
-        # Si necesitas conversiones, hazlas aquí. Por ejemplo, int(...) para Qty_Inners
-        cursor.execute(
-            insert_query,
-            (
-                row.get("Shipment", None),
-                row.get("Referencia", None),
-                row.get("Fecha de Recepción", None),
-                row.get("Cliente", None),
-                row.get("Proveedor", None),
-                row.get("Direccion", None),
-                row.get("No Factura", None),
-                row.get("Fecha Limite", None),
-                row.get("Fecha Factura", None),
-                row.get("Familia De Producto", None),
-                row.get("Num Producto", None),
-                row.get("Descripcion", None),
-                row.get("Producto Nuevo", None),
-                row.get("Huella", None),
-                row.get("Huella Default", None),
-                row.get("Recibo Habilitado", None),
-                row.get("Cantidad Esperada", None),
-                row.get("Identificada", None),
-                row.get("Cant Cajas", None),
-                row.get("Saldos Un", None),
-                row.get("Vol M3", None),
-                row.get("Articulo Padre", None),
-                row.get("Recibida", None),
-                row.get("Subfamilias", None),
-                row.get("Código Marca", None),
-                row.get("Marca", None),
-                row.get("Zona", None),
-                row.get("Tipo_Pack", None),
-                row.get("Factor_Caja", None),
-                row.get("Qty_Inners", None),
-                row.get("Qty_Unidades", None)
-            )
-        )
-
-    # 5) Confirmar cambios y cerrar
-    conn.commit()
-    cursor.close()
-    conn.close()
 
 ###############################################################################
 # 5. MENÚ LATERAL (A LA DERECHA) CON ICONOS BLANCOS
@@ -734,7 +752,7 @@ def page_home():
     col1, col2 = st.columns([1,3])
     with col1:
         # Logotipo en la sección de inicio
-        st.image("https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS-1lNB80yihWhLSgcsLbblfaUkLGdFNZXmCg&s", width=170)
+        st.image("https://www.dinet.com.pe/img/logo-dinet.png", width=170)
     with col2:
         st.markdown("<h2 class='title'>Sistema de Gestión de Abastecimiento - MAUI</h2>", unsafe_allow_html=True)
         st.markdown("<p class='credit'>Developed by: <b>PJLT</b></p>", unsafe_allow_html=True)
@@ -745,52 +763,164 @@ def page_home():
 
 
 def page_consultar_bd():
+    """
+    Esta función ahora hace 2 cosas:
+      1) Conectar a OneDrive y listar/cargar un archivo (tal como ya lo hacías).
+      2) Mostrar un CRUD (Create, Read, Update, Delete) sobre la tabla OCMaui.
+    """
+
     st.markdown("## Conectar a OneDrive con Microsoft Graph (Protegido con st.secrets)")
 
+    # -------------------------------------------------------------------------
+    # SECCIÓN 1: Lógica EXISTENTE para conectar y listar archivos de OneDrive
+    # -------------------------------------------------------------------------
     token = get_access_token()
     if not token:
         return  # Error en obtención de token
-    
+
     headers = {"Authorization": f"Bearer {token}"}
-    # Ejemplo: listar archivos en la raíz de OneDrive del usuario
     resp = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
     data = resp.json()
 
     if "value" not in data:
         st.error(f"No se encontraron archivos: {data}")
         return
-    
+
     archivos = data["value"]
     if not archivos:
         st.warning("No hay archivos en la carpeta raíz de OneDrive.")
-        return
+    else:
+        nombres = [item["name"] for item in archivos]
+        seleccionado = st.selectbox("Seleccionar archivo", nombres)
 
-    nombres = [item["name"] for item in archivos]
-    seleccionado = st.selectbox("Seleccionar archivo", nombres)
+        if st.button("Cargar archivo"):
+            # Buscamos el item
+            item = next((i for i in archivos if i["name"] == seleccionado), None)
+            if not item:
+                st.warning("No se encontró el archivo en la respuesta.")
+                return
 
-    if st.button("Cargar archivo"):
-        # Buscamos el item
-        item = next((i for i in archivos if i["name"] == seleccionado), None)
-        if not item:
-            st.warning("No se encontró el archivo en la respuesta.")
-            return
-        
-        download_url = item.get("@microsoft.graph.downloadUrl")
-        if not download_url:
-            st.warning("No hay enlace de descarga.")
-            return
-        
-        r_file = requests.get(download_url)
-        r_file.raise_for_status()
+            download_url = item.get("@microsoft.graph.downloadUrl")
+            if not download_url:
+                st.warning("No hay enlace de descarga.")
+                return
 
-        # Asumimos un Excel .xlsx de ejemplo
-        try:
-            df = pd.read_excel(BytesIO(r_file.content), engine="openpyxl")
-            st.success("Archivo leído con éxito. Vista previa:")
-            st.dataframe(df.head(20))
-        except Exception as e:
-            st.error(f"Error al leer el archivo: {e}")
+            r_file = requests.get(download_url)
+            r_file.raise_for_status()
 
+            # Asumimos un Excel .xlsx de ejemplo
+            try:
+                df = pd.read_excel(BytesIO(r_file.content), engine="openpyxl")
+                st.success("Archivo leído con éxito. Vista previa:")
+                st.dataframe(df.head(20))
+            except Exception as e:
+                st.error(f"Error al leer el archivo: {e}")
+
+
+    # -------------------------------------------------------------------------
+    # SECCIÓN 2: CRUD en la tabla oc_maui
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("## CRUD en la Tabla oc_maui (Ejemplo)")
+
+    # 1) LEER (READ) todos los registros actuales
+    with get_session() as session:
+        statement = select(OCMaui).order_by(OCMaui.id)
+        results = session.exec(statement).all()
+
+    # Convertir los registros en un DataFrame para visualizarlos
+    if results:
+        df_db = pd.DataFrame([row.dict() for row in results])  # row.dict() si usas SQLModel
+    else:
+        df_db = pd.DataFrame(columns=["id", "shipment", "referencia", "..."])
+
+    st.subheader("Registros en oc_maui")
+    st.dataframe(df_db)  # Mostramos el dataframe con los registros actuales
+
+    # 2) CREAR (CREATE)
+    st.subheader("Crear un nuevo registro")
+    with st.form("crear_registro_form", clear_on_submit=True):
+        # Ajusta los campos que quieres solicitar; 
+        # por ejemplo, shipment, referencia, fecha_recepcion, etc.
+        new_shipment = st.text_input("Shipment")
+        new_referencia = st.text_input("Referencia")
+        new_fecha = st.text_input("Fecha Recepción (YYYY-MM-DD)", value=str(datetime.now().date()))
+        new_marca = st.text_input("Marca")
+        # ... añade más campos según tu modelo ...
+
+        submitted_create = st.form_submit_button("Crear")
+        if submitted_create:
+            if new_shipment and new_referencia:
+                try:
+                    with get_session() as session:
+                        nuevo_registro = OCMaui(
+                            shipment=new_shipment,
+                            referencia=new_referencia,
+                            fecha_recepcion=new_fecha,
+                            marca=new_marca,
+                            # ... etc. ...
+                        )
+                        session.add(nuevo_registro)
+                        session.commit()
+                        st.success("¡Registro creado exitosamente!")
+                    st.experimental_rerun()  # refresca la página para ver el nuevo registro
+                except Exception as e:
+                    st.error(f"Error al crear registro: {e}")
+            else:
+                st.warning("Por favor llena al menos Shipment y Referencia.")
+
+    # 3) EDITAR (UPDATE)
+    st.subheader("Editar un registro existente (por ID)")
+    # a) Pedir el ID a editar
+    with st.form("form_editar", clear_on_submit=True):
+        edit_id = st.number_input("ID del registro a editar", min_value=1, step=1)
+        new_shipment_edit = st.text_input("Nuevo Shipment")
+        new_referencia_edit = st.text_input("Nueva Referencia")
+        new_marca_edit = st.text_input("Nueva Marca")
+        # ... añade los campos que quieras editar ...
+        submitted_edit = st.form_submit_button("Guardar cambios")
+
+        if submitted_edit:
+            with get_session() as session:
+                reg = session.get(OCMaui, edit_id)
+                if reg:
+                    if new_shipment_edit:
+                        reg.shipment = new_shipment_edit
+                    if new_referencia_edit:
+                        reg.referencia = new_referencia_edit
+                    if new_marca_edit:
+                        reg.marca = new_marca_edit
+                    # ... más campos ...
+                    try:
+                        session.add(reg)
+                        session.commit()
+                        st.success("¡Registro editado con éxito!")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Error al actualizar: {e}")
+                else:
+                    st.warning("No se encontró un registro con ese ID.")
+
+    # 4) ELIMINAR (DELETE)
+    st.subheader("Eliminar registro")
+    del_id = st.text_input("ID a eliminar")
+    if st.button("Eliminar"):
+        if del_id:
+            try:
+                del_id_int = int(del_id)
+                with get_session() as session:
+                    reg = session.get(OCMaui, del_id_int)
+                    if reg:
+                        session.delete(reg)
+                        session.commit()
+                        st.success(f"Registro con ID {del_id_int} eliminado.")
+                        st.experimental_rerun()
+                    else:
+                        st.warning("No se encontró un registro con ese ID.")
+            except ValueError:
+                st.error("El ID debe ser un número entero.")
+        else:
+            st.warning("Ingresa un ID para eliminar.")
 
 def page_realizar_analisis():
     st.markdown("## Análisis de Subfamilias con Clasificación")
@@ -932,85 +1062,6 @@ def page_realizar_analisis():
             except Exception as e:
                 st.error(f"Ocurrió un error procesando el archivo: {e}")
 
-    # 12) Subir la plantilla XLSM y actualizar
-    plantilla_file = st.file_uploader("Cargar _Plantilla_Explosión_Maui_v1.xlsm para actualizar subfamilias", 
-                                      type=["xlsm"])
-    if plantilla_file:
-        if st.button("Actualizar Plantilla y Exportar"):
-            try:
-                plantilla_bytes = plantilla_file.read()
-                in_memory_file = BytesIO(plantilla_bytes)
-                wb = load_workbook(in_memory_file, keep_vba=True)
-
-                sheet_name = "%_subfamilias"
-                if sheet_name not in wb.sheetnames:
-                    st.error(f"No se encontró la hoja '{sheet_name}' en la plantilla.")
-                    return
-
-                sheet = wb[sheet_name]
-                # Borrar filas desde la 2 hasta la última
-                max_row = sheet.max_row
-                if max_row > 1:
-                    sheet.delete_rows(2, max_row)
-
-                # Pegar encabezados en la fila 1
-                cols = list(agrupado.columns)
-                for col_idx, col_name in enumerate(cols, start=1):
-                    sheet.cell(row=1, column=col_idx, value=col_name)
-
-                # Pegar datos a partir de fila 2
-                for i, row_data in agrupado.iterrows():
-                    for j, col_name in enumerate(cols, start=1):
-                        sheet.cell(row=i+2, column=j, value=row_data[col_name])
-
-                # Guardar en memoria y exportar
-                out_file = BytesIO()
-                wb.save(out_file)
-                out_file.seek(0)
-
-                st.download_button(
-                    label="Descargar Plantilla Actualizada",
-                    data=out_file,
-                    file_name=f"_Plantilla_Explosión_{anio_seleccionado}_Actualizada.xlsm",
-                    mime="application/vnd.ms-excel.sheet.macroEnabled.12"
-                )
-
-                # Mostrar toast
-                toast_html = """
-                <style>
-                .toast-container {
-                    position: fixed;
-                    bottom: 20px;
-                    right: 20px;
-                    background-color: #fff;
-                    padding: 20px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-                    z-index: 9999;
-                    display: flex;
-                    align-items: center;
-                }
-                .toast-container img {
-                    margin-right: 10px;
-                }
-                </style>
-                <div class="toast-container" id="myToast">
-                  <img src="https://cdn-icons-png.flaticon.com/512/190/190411.png" width="40"/>
-                  <div>
-                    <strong>Plantilla actualizada correctamente</strong>
-                  </div>
-                </div>
-                <script>
-                setTimeout(function(){
-                   var t = document.getElementById("myToast");
-                   if(t){ t.style.display = "none"; }
-                }, 2000);
-                </script>
-                """
-                st.markdown(toast_html, unsafe_allow_html=True)
-
-            except Exception as e:
-                st.error(f"Error al actualizar la plantilla: {e}")
 def page_consolidar_oc():
     icon = "📝"
     st.markdown(f"## {icon} Registro de OC´s")
@@ -1117,7 +1168,7 @@ def page_consolidar_oc():
                 # Generar DataFrames derivados
                 df_f_recepcion = generar_df_f_recepcion(df_consolidado)
                 df_f_expl_unid = generar_df_f_expl_unid(df_consolidado)
-                df_expl_inner  = generar_df_expl_inner(df_consolidado)
+                df_expl_inner  = generar_df_expl_inner(df_f_recepcion, df_curva_articulo)
 
                 st.session_state["df_consolidado"]    = df_consolidado
                 st.session_state["df_curva_articulo"] = df_curva_articulo
@@ -1138,7 +1189,53 @@ def page_consolidar_oc():
                 with col_reg:
                     if not st.session_state["contenedor_registrado"]:
                         if st.button("Registrar Contenedor"):
-                            # Llamar a guardar_contenedor_bd(df_consolidado) si procede
+                            # ========================
+                            # MAPEO DE COLUMNAS (Paso 3)
+                            # ========================
+                            column_map = {
+                                "Shipment": "shipment",
+                                "Referencia": "referencia",
+                                "Fecha de Recepción": "fecha_recepcion",
+                                "Cliente": "cliente",
+                                "Proveedor": "proveedor",
+                                "Direccion": "direccion",
+                                "No Factura": "nro_factura",
+                                "Fecha Limite": "fecha_limite",
+                                "Fecha Factura": "fecha_factura",
+                                "Familia De Producto": "familia_producto",
+                                "Num Producto": "num_producto",
+                                "Descripcion": "descripcion",
+                                "Producto Nuevo": "producto_nuevo",
+                                "Huella": "huella",
+                                "Huella Default": "huella_default",
+                                "Recibo Habilitado": "recibo_habilitado",
+                                "Cantidad Esperada": "cantidad_esperada",
+                                "Identificada": "identificada",
+                                "Cant Cajas": "cant_cajas",
+                                "Saldos Un": "saldos_un",
+                                "Vol M3": "vol_m3",
+                                "Articulo Padre": "articulo_padre",
+                                "Recibida": "recibida",
+                                "Subfamilias": "subfamilia",
+                                "Código Marca": "codigo_marca",
+                                "Marca": "marca",
+                                "Zona": "zona",
+                                "Tipo_Pack": "tipo_pack",
+                                "Factor_Caja": "factor_caja",
+                                "Qty_Inners": "qty_inner",
+                                "Qty_Unidades": "qty_unidades"
+                            }
+
+                            # Creamos df_renamed
+                            df_renamed = df_consolidado.rename(columns=column_map)
+
+                            # (Llamar a tu función que guarda en BD, por ejemplo):
+                            try:
+                                guardar_contenedor_bd(df_renamed)
+                                st.success("¡Datos guardados en BD correctamente!")
+                            except Exception as err:
+                                st.error(f"Error al guardar en BD: {err}")
+
                             st.session_state["contenedor_registrado"] = True
                             st.session_state["show_toast"] = True
                     else:
@@ -1192,17 +1289,17 @@ def page_consolidar_oc():
                     # Tarjetas horizontales
                     c_inners, c_units = st.columns(2)
                     with c_inners:
-                        st.markdown("""
+                        st.markdown(f"""
                         <div style="background-color:#f8f9fa; padding:15px; border-radius:8px;">
                           <h4 style="margin:0;">Total Inners</h4>
-                          <p style="font-size:35px; margin:0; color:#007BFF;">""" + f"{int(total_inners):,}" + """</p>
+                          <p style="font-size:35px; margin:0; color:#007BFF;">{int(total_inners):,}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     with c_units:
-                        st.markdown("""
+                        st.markdown(f"""
                         <div style="background-color:#f8f9fa; padding:15px; border-radius:8px;">
                           <h4 style="margin:0;">Total Unidades</h4>
-                          <p style="font-size:35px; margin:0; color:#28a745;">""" + f"{int(total_unidades):,}" + """</p>
+                          <p style="font-size:35px; margin:0; color:#28a745;">{int(total_unidades):,}</p>
                         </div>
                         """, unsafe_allow_html=True)
 
@@ -1231,8 +1328,12 @@ def page_consolidar_oc():
                         df_subfam.sort_values("Total", ascending=False, inplace=True)
 
                         # Gráfico con Altair
-                        chart_data = df_subfam.melt(id_vars="Subfamilias", value_vars=["Qty_Inners", "Qty_Unidades"],
-                                                    var_name="Tipo", value_name="Cantidad")
+                        chart_data = df_subfam.melt(
+                            id_vars="Subfamilias",
+                            value_vars=["Qty_Inners", "Qty_Unidades"],
+                            var_name="Tipo",
+                            value_name="Cantidad"
+                        )
                         chart = alt.Chart(chart_data).mark_bar().encode(
                             x=alt.X("Cantidad:Q", title="Cantidad"),
                             y=alt.Y("Subfamilias:N", sort="-x"),
@@ -1241,7 +1342,6 @@ def page_consolidar_oc():
                         ).properties(width=600, height=400)
 
                         st.altair_chart(chart, use_container_width=True)
-
                     else:
                         st.warning("No existe la columna 'Subfamilias' para el resumen.")
                 else:
@@ -1257,7 +1357,6 @@ def page_consolidar_oc():
                     opciones = [
                         "df_f_expl_unid",
                         "df_curva_articulo",
-                        "df_consolidado",
                         "df_f_recepción",
                         "df_expl_inner"
                     ]
@@ -1304,15 +1403,24 @@ def page_consolidar_oc():
                                 for j, value in enumerate(row_data):
                                     sheet_unid.cell(row=start_row + i, column=start_col + j, value=value)
 
-                            sheet_recep = wb["df_f_recepción"]
-                            for i, row_data in df_f_recep.iterrows():
-                                for j, value in enumerate(row_data):
-                                    sheet_recep.cell(row=start_row + i, column=start_col + j, value=value)
+                            # Eliminar filas vacías del DataFrame df_f_recep antes de pegarlas
+                            df_f_recep_clean = df_f_recep.dropna(how='all')  # Elimina filas completamente vacías
 
+                            # Escribir todos los datos en bloque (a partir de la fila 11)
+                            sheet_recep = wb["df_f_recepción"]
+                            start_row_recep = 11  # Comenzamos en la fila 11 de la columna C para df_f_recep
+
+                            # Convertir el DataFrame limpio a filas de Excel y escribirlas en bloque
+                            for r_idx, row in enumerate(dataframe_to_rows(df_f_recep_clean, index=False, header=False), start=start_row_recep):
+                                for c_idx, value in enumerate(row, start=3):  # Comienza a pegar desde la columna 3 (columna C)
+                                    sheet_recep.cell(row=r_idx, column=c_idx, value=value)
+
+                            start_row1 = 11
                             sheet_inner = wb["df_expl_inner"]
+                            # Pegar los datos en bloque desde la celda C11
                             for i, row_data in df_inner.iterrows():
                                 for j, value in enumerate(row_data):
-                                    sheet_inner.cell(row=start_row + i, column=start_col + j, value=value)
+                                    sheet_inner.cell(row=start_row1 + i, column=start_col + j, value=value)
 
                             out_file = BytesIO()
                             file_name = f"Explosión_Maui_{contenedor_val}_{referencia_val}_{fecha_str}.xlsm"
@@ -1326,9 +1434,10 @@ def page_consolidar_oc():
                                 mime="application/vnd.ms-excel.sheet.macroEnabled.12"
                             )
                             st.success(f"Plantilla exportada correctamente: {file_name}")
-
+                                 
                         except Exception as e:
-                            st.error(f"Ocurrió un error al exportar la plantilla: {e}")
+                            st.error(f"Error al exportar la plantilla: {e}")
+
                 else:
                     st.warning("Por favor, registre el contenedor para habilitar la exportación.") 
 
@@ -1338,6 +1447,7 @@ def page_consolidar_oc():
             st.warning("No se pudo consolidar ningún archivo.")
     else:
         st.warning("Por favor, sube los archivos CSV y el archivo de Curva Artículo para continuar.")
+
 
 
 ###############################################################################
