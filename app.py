@@ -1393,15 +1393,23 @@ def page_consolidar_oc():
                             wb = load_workbook(in_memory_file, keep_vba=True)
 
                             sheet_unid = wb["df_f_expl_unid"]
+
+                            # Estos valores en las celdas I2, J2, K2 permanecen igual:
                             sheet_unid["I2"] = contenedor_val
                             sheet_unid["J2"] = referencia_val
                             sheet_unid["K2"] = str(fecha_val)
 
-                            start_row = 9
+                            # Definimos la celda de inicio para pegar los datos (C9 => fila 9, columna 3)
+                            start_row = 11
                             start_col = 3
-                            for i, row_data in df_f_unid.iterrows():
-                                for j, value in enumerate(row_data):
-                                    sheet_unid.cell(row=start_row + i, column=start_col + j, value=value)
+
+                            # 1. Convertir el DataFrame en filas (sin encabezados, sin índice)
+                            rows = dataframe_to_rows(df_f_unid, index=False, header=False)
+
+                            # 2. Pegar en bloque en la hoja:
+                            for r_idx, row_data in enumerate(rows, start=start_row):
+                                for c_idx, cell_value in enumerate(row_data, start=start_col):
+                                    sheet_unid.cell(row=r_idx, column=c_idx, value=cell_value)
 
                             # Eliminar filas vacías del DataFrame df_f_recep antes de pegarlas
                             df_f_recep_clean = df_f_recep.dropna(how='all')  # Elimina filas completamente vacías
