@@ -1013,7 +1013,7 @@ def page_realizar_analisis():
 
                 # Clasificar (Mezzanine o Selectivo) y comentarios
                 def clasificar(row):
-                    if row["Cant_Unidad"] > 200:
+                    if row["Cant_Unidad"] > 450:
                         return "Mezzanine"
                     else:
                         return "Selectivo"
